@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#14202e">
+<title>Dawn of Kings — Prototype</title>
+<style>
+  :root{--bg:#14202e;--panel:rgba(20,28,40,.92);--line:#3a4a60;--gold:#ffd976;--txt:#eef2f7;--dim:#9db0c6;--bad:#ff7a6a;--ok:#7be08a}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;user-select:none}
+  html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--txt);font:14px/1.35 system-ui,Segoe UI,Roboto,sans-serif;touch-action:none}
+  canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
+  #top{position:fixed;top:0;left:0;right:0;display:flex;gap:6px;flex-wrap:wrap;padding:calc(6px + env(safe-area-inset-top)) 8px 6px;pointer-events:none;align-items:flex-start}
+  .chip{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:5px 9px;font-weight:600;white-space:nowrap}
+  .chip small{color:var(--dim);font-weight:400}
+  #meta{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+  button{font:inherit;color:var(--txt);background:#2b3b52;border:1px solid var(--line);border-radius:10px;padding:9px 13px;min-height:42px;cursor:pointer;pointer-events:auto}
+  button:hover:not(:disabled){background:#364b69}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.pri{background:#b8821f;border-color:#e8b550;color:#fff;font-weight:700}
+  button.pri:hover:not(:disabled){background:#cf9528}
+  button.red{background:#8a2f2a;border-color:#c85a50}
+  .bad{color:var(--bad)}
+  #bar{position:fixed;left:0;right:0;bottom:0;display:flex;gap:8px;padding:8px 8px calc(8px + env(safe-area-inset-bottom));justify-content:space-between;pointer-events:none}
+  #bar>div{display:flex;gap:8px;pointer-events:none}
+  #hint{position:fixed;left:50%;top:84px;transform:translateX(-50%);max-width:92vw;background:rgba(184,130,31,.95);border:1px solid #ffd976;border-radius:12px;padding:7px 14px;font-weight:600;pointer-events:none;text-align:center}
+  #hint:empty{display:none}
+  #panel{position:fixed;left:50%;transform:translateX(-50%);bottom:70px;width:min(420px,96vw);background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px;display:none;max-height:55vh;overflow:auto;touch-action:pan-y}
+  #panel h3{margin:0 0 2px}
+  #panel .row,.row{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;align-items:center}
+  .prog{height:8px;background:#0006;border-radius:6px;overflow:hidden;margin-top:6px}.prog i{display:block;height:100%;background:var(--gold)}
+  .dim{color:var(--dim)}
+  #modalWrap{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;padding:12px;z-index:5}
+  #modal{background:#1a2638;border:1px solid var(--line);border-radius:16px;padding:16px;width:min(460px,100%);max-height:88vh;overflow:auto;touch-action:pan-y}
+  #modal h2{margin:0 0 6px}#modal h3{margin:12px 0 4px;color:var(--gold)}
+  .list button{display:flex;justify-content:space-between;width:100%;text-align:left;margin-top:6px;gap:8px}
+  .tbl{width:100%;border-collapse:collapse}.tbl td{padding:3px 6px;border-bottom:1px solid #fff1}
+  .me{color:var(--gold);font-weight:700}
+  #battleTop{position:fixed;top:calc(52px + env(safe-area-inset-top));left:50%;transform:translateX(-50%);display:none;gap:8px;pointer-events:none}
+  #troops{display:none}
+  #toast{position:fixed;left:50%;bottom:120px;transform:translateX(-50%);background:#000c;padding:8px 14px;border-radius:20px;opacity:0;transition:opacity .25s;pointer-events:none;z-index:9}
+  #banner{position:fixed;left:0;right:0;top:120px;text-align:center;font-size:22px;font-weight:800;color:#fff;text-shadow:0 2px 8px #000;pointer-events:none;opacity:0;transition:opacity .4s}
+  #alert{position:fixed;left:50%;top:84px;transform:translateX(-50%);background:#8a2f2a;border:1px solid #ff8a7a;border-radius:12px;padding:8px 14px;font-weight:700;display:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="top"><div id="res" style="display:flex;gap:6px;flex-wrap:wrap"></div><div id="meta"></div></div>
+<div id="hint"></div>
+<div id="alert"></div>
+<div id="banner"></div>
+<div id="battleTop"><div class="chip" id="bTime"></div><div class="chip" id="bPct"></div><div class="chip" id="bStars"></div></div>
+<div id="panel"></div>
+<div id="bar">
+  <div id="homeBtns">
+    <button class="pri" id="btnBuild">🔨 Build</button>
+    <button id="btnArmy">🛡️ Army</button>
+    <button id="btnLadder">🏆 Ladder</button>
+  </div>
+  <div id="buildBtns" style="display:none">
+    <button class="pri" id="btnOk">✔ Place</button>
+    <button class="red" id="btnCancel">✖ Cancel</button>
+  </div>
+  <div id="troops" style="display:none"><div id="troopBtns" style="display:flex;gap:8px"></div><button class="red" id="btnEnd">End Battle</button></div>
+  <div id="rightBtns"><button class="pri" id="btnRaid">⚔️ Raid</button></div>
+</div>
+<div id="toast"></div>
+<div id="modalWrap"><div id="modal"></div></div>
+<script src="js/data.js"></script>
+<script src="js/sim.js"></script>
+<script src="js/render.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>

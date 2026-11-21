@@ -1,0 +1,15 @@
+build/
+.claude/
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/local.properties
+*.log
+art/renders/
+art/ld/
+art/audio_preview/
+art/prev*.png
+art/ld_*.png
+art/preview*.png
+third_party/**/build/

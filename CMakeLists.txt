@@ -1,0 +1,53 @@
+cmake_minimum_required(VERSION 3.20)
+project(DawnOfKings LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
+# --- Vendored dependencies (no network needed to build) ---
+if(ANDROID)
+  set(SDL_SHARED ON CACHE BOOL "" FORCE)
+  set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+else()
+  set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+  set(SDL_STATIC ON CACHE BOOL "" FORCE)
+endif()
+set(SDL_TEST OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/SDL2-2.30.9 EXCLUDE_FROM_ALL)
+
+if(ANDROID)
+  set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
+else()
+  set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+endif()
+set(SDL2TTF_VENDORED ON CACHE BOOL "" FORCE)
+set(SDL2TTF_SAMPLES OFF CACHE BOOL "" FORCE)
+set(SDL2TTF_INSTALL OFF CACHE BOOL "" FORCE)
+set(SDL2TTF_HARFBUZZ OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/SDL2_ttf-2.22.0 EXCLUDE_FROM_ALL)
+
+set(GAME_SOURCES src/defs.cpp src/sim.cpp src/game.cpp src/gfx.cpp src/sprites.cpp src/audio.cpp src/fx.cpp src/app.cpp)
+
+if(ANDROID)
+  add_library(main SHARED ${GAME_SOURCES})
+  if(TARGET SDL2::SDL2main)
+    target_link_libraries(main PRIVATE SDL2::SDL2main)
+  endif()
+  target_link_libraries(main PRIVATE SDL2::SDL2 SDL2_ttf::SDL2_ttf log android)
+else()
+  add_executable(DawnOfKings WIN32 ${GAME_SOURCES})
+  if(TARGET SDL2::SDL2main)
+    target_link_libraries(DawnOfKings PRIVATE SDL2::SDL2main)
+  endif()
+  target_link_libraries(DawnOfKings PRIVATE SDL2::SDL2-static SDL2_ttf::SDL2_ttf-static)
+  if(MSVC)
+    target_compile_options(DawnOfKings PRIVATE /W3 /utf-8)
+    set_property(TARGET DawnOfKings PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  endif()
+  # ship the font next to the exe
+  add_custom_command(TARGET DawnOfKings POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:DawnOfKings>/assets)
+endif()
