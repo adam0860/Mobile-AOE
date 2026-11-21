@@ -348,7 +348,8 @@ def make_horse(kind):
     scene.collection.objects.link(root); _created.append(root)
     R['root'] = root
     pal = kind == 'paladin'
-    coat = M['woodLight'] if pal else M['hide']
+    scout = kind == 'scout'
+    coat = M['woodLight'] if pal else (M['hay'] if scout else M['hide'])
     s = 1.05 if pal else 1.0
     body = _jt(root, 0, 0, 0.7 * s, 'body')
     R['body'] = body
@@ -385,12 +386,18 @@ def make_horse(kind):
     # rider on the saddle
     rider = _jt(body, -0.02, 0, 0.22 * s, 'rider')
     R['rider'] = rider
-    _cy(rider, 0, 0, 0.0, 0.15, 0.36, M['metal'] if pal else M['iron'], verts=10, r2=0.12)
+    _cy(rider, 0, 0, 0.0, 0.15, 0.36, M['hide'] if scout else (M['metal'] if pal else M['iron']), verts=10, r2=0.12)
     _cy(rider, 0, 0, 0.08, 0.16, 0.22, tm, verts=10, r2=0.13)
     rh = _jt(rider, 0, 0, 0.42, 'rhead')
-    _sp(rh, 0, 0, 0.1, 0.115, M['metal'], seg=10, sz=1.05)
-    _bx(rh, 0.11, 0, 0.05, 0.025, 0.16, 0.06, M['black'])
-    _cn(rh, 0, 0, 0.19, 0.045, 0.28 if pal else 0.14, tm, 6)
+    if scout:
+        _sp(rh, 0, 0, 0.1, 0.105, M['skin'], seg=10)
+        _cy(rh, 0, 0, 0.17, 0.14, 0.03, M['hay'], verts=12)
+        _cn(rh, 0, 0, 0.19, 0.1, 0.12, M['hay'], 10)
+        _bx(rh, 0.09, 0, 0.08, 0.02, 0.14, 0.03, M['black'])
+    else:
+        _sp(rh, 0, 0, 0.1, 0.115, M['metal'], seg=10, sz=1.05)
+        _bx(rh, 0.11, 0, 0.05, 0.025, 0.16, 0.06, M['black'])
+        _cn(rh, 0, 0, 0.19, 0.045, 0.28 if pal else 0.14, tm, 6)
     for sd in (-1, 1):
         _bx(rider, 0.02, sd * 0.1, -0.18, 0.1, 0.05, 0.18, M['iron'])                          # thigh
     arm = _jt(rider, 0, -0.18, 0.36, 'rarm')
@@ -403,6 +410,9 @@ def make_horse(kind):
     lsh = _jt(rider, 0, 0.19, 0.3, 'lsh')
     _bx(lsh, 0.02, 0.05, -0.2, 0.03, 0.2, 0.36, tm)
     _bx(lsh, 0.04, 0.05, -0.15, 0.02, 0.04, 0.26, M['white'])
+    if scout:
+        for _o in list(lance.children) + list(lsh.children):
+            _o.hide_render = True
     return R
 
 def horse_pose(R, f, mode):
@@ -571,10 +581,10 @@ def siege_pose(R, f, mode, a=0):
 
 # ------------------------------------------------------------------ render driver
 HUMANOIDS = ('villager', 'militia', 'manatarms', 'archer', 'longsword', 'crossbow', 'monk', 'champion', 'arbalester', 'handcannon')
-CAVALRY = ('knight', 'paladin')
+CAVALRY = ('knight', 'paladin', 'scout')
 SIEGE = ('ram', 'mangonel', 'trebuchet', 'bombard')
 UNIT_KINDS = HUMANOIDS + CAVALRY + SIEGE
-UNIT_SCALE = {'knight': 0.9, 'paladin': 0.92, 'ram': 0.95, 'mangonel': 0.95, 'trebuchet': 0.85, 'bombard': 0.95}
+UNIT_SCALE = {'scout': 0.88, 'knight': 0.9, 'paladin': 0.92, 'ram': 0.95, 'mangonel': 0.95, 'trebuchet': 0.85, 'bombard': 0.95}
 
 def render_unit_kind(kind):
     clear_models()

@@ -23,6 +23,7 @@ struct Sim {
   std::vector<SimB> b; std::vector<SimUnit> units; std::vector<Proj> proj; std::vector<Spawn> sq;
   float t = 0, timeLeft = 180; bool started = false, over = false, defence = false; int nid = 1;
   SideMul mul[2];                       // [0] = attackers, [1] = defenders
+  int atkTc = 1, atkDiff = 0;           // NPC raids: the attacker's Town Center level and how far it is above (+) / below (-) yours
   std::vector<SimEvent> events;         // audio/visual events raised this step (drained by the app)
   std::vector<Corpse> corpses;          // fallen units fading out
   void emit(int type, float x, float y) { events.push_back({type, x, y}); }

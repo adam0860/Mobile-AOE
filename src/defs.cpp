@@ -8,14 +8,14 @@ const uint32_t RES_COL[NRES] = {0x8a5a2b, 0xe6c84a, 0xf2c230, 0x9aa0a8};
 static const BDef BD[B_COUNT] = {
   {"Town Center", "TC", 3, 3, 0xb5894f, 44, {1500, 1900, 2500}, {10, 13, 17}, 6, true, true, 1, {1, 1, 1}, {}, 0, -1, -1, -1, 0, {0, 0, 0}, "Heart of your village"},
   {"House", "H", 2, 2, 0xa8794a, 22, {250, 350, 450}, {0, 0, 0}, 0, false, false, 1, {2, 4, 6}, mkc(100), 8, 0, -1, -1, 0, {0, 0, 0}, "+5 villager capacity"},
-  {"Lumber Camp", "L", 2, 2, 0x8a6a3a, 16, {300, 400, 500}, {0, 0, 0}, 0, false, false, 1, {1, 2, 3}, mkc(80), 8, 0, WOOD, N_TREE, 50, {3, 4, 5}, "Villagers chop nearby trees"},
-  {"Gold Mining Camp", "G", 2, 2, 0x9a7d2e, 16, {300, 400, 500}, {0, 0, 0}, 0, false, false, 1, {1, 1, 2}, mkc(100), 10, 0, GOLD, N_GOLD, 32, {3, 4, 5}, "Villagers mine nearby gold"},
-  {"Stone Mining Camp", "S", 2, 2, 0x7b7f86, 16, {300, 400, 500}, {0, 0, 0}, 0, false, false, 1, {1, 1, 2}, mkc(100), 10, 0, STONE, N_STONE, 30, {3, 4, 5}, "Villagers mine nearby stone"},
-  {"Farm", "F", 2, 2, 0xc8b04a, 4, {150, 200, 250}, {0, 0, 0}, 0, false, false, 1, {2, 4, 6}, mkc(100), 8, 0, FOOD, -1, 40, {1, 1, 1}, "One farmer produces food"},
-  {"Barracks", "B", 3, 3, 0x8c4a3a, 30, {500, 700, 900}, {0, 0, 0}, 0, false, false, 1, {1, 1, 2}, mkc(200, 0, 0, 50), 20, 1, -1, -1, 0, {0, 0, 0}, "Militia, Men-at-Arms, Long Swordsmen"},
+  {"Lumber Camp", "L", 2, 2, 0x8a6a3a, 16, {300, 400, 500}, {0, 0, 0}, 0, false, false, 1, {1, 2, 3}, mkc(80), 8, 0, WOOD, N_TREE, 64, {3, 4, 5}, "Villagers chop nearby trees"},
+  {"Gold Mining Camp", "G", 2, 2, 0x9a7d2e, 16, {300, 400, 500}, {0, 0, 0}, 0, false, false, 3, {1, 1, 2}, mkc(100), 10, 0, GOLD, N_GOLD, 32, {3, 4, 5}, "Villagers mine nearby gold"},
+  {"Stone Mining Camp", "S", 2, 2, 0x7b7f86, 16, {300, 400, 500}, {0, 0, 0}, 0, false, false, 3, {1, 1, 2}, mkc(100), 10, 0, STONE, N_STONE, 30, {3, 4, 5}, "Villagers mine nearby stone"},
+  {"Farm", "F", 2, 2, 0xc8b04a, 4, {150, 200, 250}, {0, 0, 0}, 0, false, false, 1, {2, 4, 6}, mkc(100), 8, 0, FOOD, -1, 28, {1, 1, 1}, "One farmer produces food"},
+  {"Barracks", "B", 3, 3, 0x8c4a3a, 30, {500, 700, 900}, {0, 0, 0}, 0, false, false, 1, {1, 1, 2}, mkc(260), 20, 1, -1, -1, 0, {0, 0, 0}, "Militia, Men-at-Arms, Long Swordsmen"},
   {"Army Camp", "A", 3, 3, 0x6f8a4a, 12, {300, 400, 500}, {0, 0, 0}, 0, false, false, 1, {1, 2, 3}, mkc(150), 15, 1, -1, -1, 0, {0, 0, 0}, "+20 army housing"},
   {"Archery Range", "R", 3, 3, 0x4a7a5a, 28, {500, 700, 900}, {0, 0, 0}, 0, false, false, 3, {0, 0, 1}, mkc(300, 0, 100), 25, 1, -1, -1, 0, {0, 0, 0}, "Trains Archers and Crossbowmen"},
-  {"Watch Tower", "T", 2, 2, 0x8e8a80, 46, {300, 420, 560}, {12, 16, 21}, 6.5f, false, false, 1, {1, 2, 4}, mkc(100, 0, 0, 80), 15, 2, -1, -1, 0, {0, 0, 0}, "Fires arrows at raiders"},
+  {"Watch Tower", "T", 2, 2, 0x8e8a80, 46, {300, 420, 560}, {12, 16, 21}, 6.5f, false, false, 1, {1, 2, 4}, mkc(150), 15, 2, -1, -1, 0, {0, 0, 0}, "Fires arrows at raiders"},
   // ---- Castle Age ----
   {"Stable", "Sb", 3, 3, 0x7a5a3a, 30, {600, 800, 1000}, {0, 0, 0}, 0, false, false, 5, {0, 0, 1}, mkc(300, 0, 100), 30, 1, -1, -1, 0, {0, 0, 0}, "Trains Knights"},
   {"Siege Workshop", "Sw", 3, 3, 0x6a5a4a, 34, {600, 800, 1000}, {0, 0, 0}, 0, false, false, 5, {0, 0, 1}, mkc(400, 0, 150, 100), 40, 1, -1, -1, 0, {0, 0, 0}, "Builds Battering Rams and Mangonels"},
@@ -37,6 +37,8 @@ static const BDef BD[B_COUNT] = {
   {"Storehouse", "St", 2, 2, 0x9a7a4a, 18, {400, 600, 800}, {0, 0, 0}, 0, false, true, 1, {0, 0, 0}, {}, 0, -1, -1, -1, 0, {0, 0, 0}, ""},
   {"Barbarian Tent", "Tn", 2, 2, 0x7a5a3a, 16, {200, 200, 200}, {0, 0, 0}, 0, false, true, 1, {0, 0, 0}, {}, 0, -1, -1, -1, 0, {0, 0, 0}, ""},
   {"Chieftain's Hall", "Ch", 3, 3, 0x6a4a2a, 30, {700, 700, 700}, {0, 0, 0}, 0, true, true, 1, {0, 0, 0}, {}, 0, -1, -1, -1, 0, {0, 0, 0}, ""},
+  // ---- exploration ----
+  {"Mill", "Mi", 2, 2, 0xd8c8a0, 24, {300, 400, 500}, {0, 0, 0}, 0, false, false, 1, {2, 3, 4}, mkc(100), 10, 0, FOOD, N_GAME, 36, {3, 4, 5}, "Hunters bring wild game here (animals within 9 tiles)"},
 };
 
 // buildings allowed per Town Center level (index = tc-1)
@@ -66,13 +68,14 @@ static const int MAXN[B_COUNT][MAXTC] = {
   {0, 0, 0, 0, 0, 2, 3, 4, 5, 6},          // oil traps
   {0, 0, 0, 0, 0, 0, 1, 2, 3, 4},          // scorpion emplacements
   {0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+  {2, 3, 4, 5, 6, 7, 8, 9, 10, 10},      // mill
 };
 
 // Town Center upgrade costs (scaled down from the GDD for the prototype's faster pace)
 static const TcUp TCU[11] = {
   {}, {},
   {mkc(400, 300), 30, "Upgrade to Level 2"},
-  {mkc(1200, 800, 400), 90, "Advance to Feudal Age"},
+  {mkc(1500, 1000), 90, "Advance to Feudal Age"},
   {mkc(1600, 1000, 400, 250), 150, "Upgrade to Level 4"},
   {mkc(3500, 2500, 1200, 800), 300, "Advance to Castle Age"},
   {mkc(7000, 5000, 3000, 2000), 500, "Upgrade to Level 6"},
@@ -86,7 +89,7 @@ static const int PROT[MAXTC] = {200, 400, 800, 1500, 3000, 5000, 8000, 12000, 18
 
 //   name, tag, hp, dmg, rate, range, speed, cost, time, pop, unlock, bld, ranged, colour, heal, splash, arrowArmor, prefDef, siege
 static const UDef UD[U_COUNT] = {
-  {"Militia", "Mi", 60, 8, 1, 0.9f, 1.7f, mkc(0, 40, 20), 8, 1, 1, B_BARRACKS, false, 0xd9b45a},
+  {"Militia", "Mi", 60, 8, 1, 0.9f, 1.7f, mkc(25, 40, 0), 8, 1, 1, B_BARRACKS, false, 0xd9b45a},
   {"Man-at-Arms", "MA", 130, 12, 1, 0.9f, 1.5f, mkc(0, 60, 20), 12, 1, 3, B_BARRACKS, false, 0x9aa3b5},
   {"Archer", "Ar", 40, 7, 1, 5.0f, 1.7f, mkc(25, 0, 45), 10, 1, 3, B_ARCHERY, true, 0x5fae6a},
   {"Long Swordsman", "LS", 190, 17, 1, 0.9f, 1.5f, mkc(0, 70, 30), 14, 1, 5, B_BARRACKS, false, 0xb8c0d0},
@@ -149,6 +152,9 @@ SimB makeSimB(BType type, int lvl, int x, int y) {
   return s;
 }
 
+int campTier(int level) { return level <= 4 ? 1 : clampi(1 + (level - 1) / 4, 1, MAXTC); }
+int campUnlockTc(int level) { for (int tc = 1; tc <= MAXTC; tc++) if (level <= std::min(NCAMP, 3 + 4 * (tc - 1) + (tc >= MAXTC ? 1 : 0))) return tc; return MAXTC; }
+
 Base genBase(uint32_t seed, int tc, bool barb, int level) {
   Rng r(seed); Base out; std::set<std::pair<int, int>> occ;
   auto freeAt = [&](int x, int y, int w, int h) {
@@ -169,7 +175,8 @@ Base genBase(uint32_t seed, int tc, bool barb, int level) {
       if (put(t, lvl, roundi(15 + std::cos(a) * rad - d.w / 2.0), roundi(15 + std::sin(a) * rad - d.h / 2.0))) return;
     }
   };
-  if (barb) {
+  bool bigBarb = barb && level > 5;                       // camps 6..40 are fortified like rival lords (chieftain's hall instead of a Town Center)
+  if (barb && !bigBarb) {
     put(B_CHIEF, 1, 14, 14);
     int tents = 2 + level, towers = (int)std::floor(level / 1.5);
     for (int i = 0; i < tents; i++) scatter(B_TENT, 1, 4, 8);
@@ -177,15 +184,16 @@ Base genBase(uint32_t seed, int tc, bool barb, int level) {
     out.loot = mkc(250 + 220 * level, 100 + 100 * level, 120 + 150 * level, 80 + 100 * level);
     out.name = "Barbarian Camp " + std::to_string(level);
   } else {
-    tc = clampi(tc, 1, MAXTC);
-    put(B_TOWNHALL, tc, 14, 14);
-    out.pers = (int)(r.next() * 4);
+    if (bigBarb) tc = campTier(level); else tc = clampi(tc, 1, MAXTC);
+    put(bigBarb ? B_CHIEF : B_TOWNHALL, tc, 14, 14);
+    out.pers = bigBarb ? 0 : (int)(r.next() * 4);
     int houses = 3 + tc * 2, towers = tc + 1, stores = 2 + tc;
     if (out.pers == 0) { towers += 2; houses -= 1; }
     if (out.pers == 2) { stores += 2; towers -= 1; }
     if (out.pers == 1) houses += 1;
     towers = std::min(towers, 10);
     bool walled = tc >= 2 && (out.pers == 0 || r.next() < 0.35 + 0.06 * tc);
+    if (bigBarb) walled = level >= 12 && (level >= 24 || r.next() < 0.45);
     rcapGlobal = walled ? 7.2 : 99.0;
     if (walled) {
       int wl = clampi(tc, 1, MAXLVL), lo = 5, hi = 25;
@@ -204,11 +212,17 @@ Base genBase(uint32_t seed, int tc, bool barb, int level) {
     if (tc >= 6) scatter(B_CASTLE, tc - 3, 5, 8);                       // garrison castle
     if (tc >= 5) { int keeps = 1 + (tc - 5) + (out.pers == 0 ? 1 : 0); for (int i = 0; i < keeps; i++) scatter(B_KEEP, tc - 3, 4, 8); }
     for (int i = 0; i < towers; i++) scatter(B_TOWER, std::min(tc, MAXLVL), 3.5, 7.5);
-    if (tc >= 5) { scatter(B_BARRACKS, tc - 2, 5, 9); scatter(B_STABLE, tc - 3, 5, 9); scatter(B_BLACKSMITH, tc - 2, 5, 9); if (tc >= 4) scatter(B_MARKET, tc - 2, 5, 9); }
+    if (tc >= 5 && !bigBarb) { scatter(B_BARRACKS, tc - 2, 5, 9); scatter(B_STABLE, tc - 3, 5, 9); scatter(B_BLACKSMITH, tc - 2, 5, 9); if (tc >= 4) scatter(B_MARKET, tc - 2, 5, 9); }
     for (int i = 0; i < stores; i++) scatter(B_STOREHOUSE, 1, 4, 10);
-    for (int i = 0; i < houses; i++) scatter(B_HOUSE, std::max(1, tc - 2), 4, 11);
-    double base = 500 * std::pow((double)tc, 1.6) * (out.pers == 2 ? 1.4 : 1.0) * (0.8 + r.next() * 0.4);
-    out.loot = mkc(roundi(base), roundi(base * 0.7), roundi(base * 0.55), roundi(base * 0.4));
+    for (int i = 0; i < houses; i++) scatter(bigBarb ? B_TENT : B_HOUSE, bigBarb ? 1 : std::max(1, tc - 2), 4, 11);
+    if (bigBarb) {
+      out.name = "Barbarian Camp " + std::to_string(level);
+      double k = (250 + 220.0 * level) * (1.0 + 0.045 * (level - 5));
+      out.loot = mkc(roundi(k), roundi(k * 0.5), roundi(k * 0.65), roundi(k * 0.45));
+    } else {
+      double base = 500 * std::pow((double)tc, 1.6) * (out.pers == 2 ? 1.4 : 1.0) * (0.8 + r.next() * 0.4);
+      out.loot = mkc(roundi(base), roundi(base * 0.7), roundi(base * 0.55), roundi(base * 0.4));
+    }
   }
   return out;
 }

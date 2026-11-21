@@ -455,9 +455,10 @@ exec(open(os.path.join(HERE, 'models_v2.py'), encoding='utf-8').read(), globals(
 exec(open(os.path.join(HERE, 'models_nature.py'), encoding='utf-8').read(), globals())
 exec(open(os.path.join(HERE, 'models_units_v3.py'), encoding='utf-8').read(), globals())
 exec(open(os.path.join(HERE, 'models_icons.py'), encoding='utf-8').read(), globals())
+exec(open(os.path.join(HERE, 'models_explore.py'), encoding='utf-8').read(), globals())
 
 import zlib
-NODECOR = ('wall_', 'gate_', 'spike', 'oil', 'wallrubble', 'oak', 'pine', 'palm', 'node_', 'bush', 'tuft', 'rock', 'flower', 'rubble', 'scaffold', 'stump', 'decor', 'ground', 'farm')
+NODECOR = ('deer', 'boar', 'wolf', 'chest', 'wall_', 'gate_', 'spike', 'oil', 'wallrubble', 'oak', 'pine', 'palm', 'node_', 'bush', 'tuft', 'rock', 'flower', 'rubble', 'scaffold', 'stump', 'decor', 'ground', 'farm')
 def do_building(name, fw, fh, up, fn, *a):
     if not should(name):
         return
@@ -548,6 +549,14 @@ do_imperial('castle_3', 4, 4, 4.0, m_castle, 3)
 do_imperial('university_3', 3, 3, 3.3, m_university, 3)
 do_building('university_2', 3, 3, 3.3, m_university, 2)
 do_building('storehouse_0', 2, 2, 1.4, m_storehouse)
+do_building('mill_0', 2, 2, 2.4, m_mill)
+for _an in ('deer', 'boar', 'wolf'):
+    for _k in range(4):
+        if should('%s_%d' % (_an, _k)):
+            W_, H_, oy_ = sprite_canvas(1, 1, 1.3)
+            m_animal(_an, _k)
+            render('%s_%d' % (_an, _k), W_, H_, oy_)
+do_building('chest_0', 1, 1, 0.7, m_chest)
 do_building('tent_0', 2, 2, 1.4, m_tent)
 do_building('chief_0', 3, 3, 2.4, m_chief)
 for n in (2, 3, 4):

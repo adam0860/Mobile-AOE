@@ -7,17 +7,21 @@
 #include <vector>
 
 constexpr int TW = 64, TH = 32, MAP = 30, MAXLVL = 10, MAXTC = 10;
+constexpr int WEXT = 15, WORLD = MAP + 2 * WEXT;   // the home area is 0..MAP; the explorable world reaches WEXT tiles further on every side
+constexpr int NCAMP = 40;                          // barbarian camps
+int campTier(int level);                           // strength tier (1..MAXTC) of a barbarian camp
+int campUnlockTc(int level);                       // Town Center level needed for camp `level`
 
 enum Res { WOOD, FOOD, GOLD, STONE, NRES };
 // NOTE: order is part of the save format (player-buildable types first); append new types, never reorder.
 enum BType {
   B_TOWNHALL, B_HOUSE, B_LUMBER, B_GOLDCAMP, B_STONECAMP, B_FARM, B_BARRACKS, B_ARMYCAMP, B_ARCHERY, B_TOWER,
   B_STABLE, B_SIEGE, B_MONASTERY, B_KEEP, B_BLACKSMITH, B_MARKET, B_CASTLE, B_UNIVERSITY, B_BOMBARD, B_WALL, B_GATE, B_SPIKE, B_OIL, B_SCORPION,
-  B_STOREHOUSE, B_TENT, B_CHIEF, B_COUNT
+  B_STOREHOUSE, B_TENT, B_CHIEF, B_MILL, B_COUNT
 };
 enum UType { U_MILITIA, U_MANATARMS, U_ARCHER, U_LONGSWORD, U_CROSSBOW, U_KNIGHT, U_MONK, U_RAM, U_MANGONEL,
   U_CHAMPION, U_ARBALEST, U_PALADIN, U_CANNONEER, U_TREBUCHET, U_BOMBARD, U_COUNT };
-enum NodeType { N_TREE, N_GOLD, N_STONE };
+enum NodeType { N_TREE, N_GOLD, N_STONE, N_GAME };   // N_GAME = hunted animals (Mill)
 enum TechId { T_FORGING, T_ARMOR, T_FLETCH, T_MASONRY, T_SIEGE, T_CHEMISTRY, T_COUNT };
 
 extern const char* RES_NAME[NRES];
