@@ -914,7 +914,18 @@ static void rotButtons(float mx, float my, float mw) {
 }
 static void openRaidChecks() {}
 
+static int activeSlider = -1; static bool sliderTouched = false;
+static float slider(int id, float x, float y, float w, float v, uint32_t col) {          // horizontal 0..1 slider; returns the new value
+  float h = U(36), cy = y + h / 2; SDL_FRect hit{x - U(14), y, w + U(28), h};
+  if (in.down && activeSlider < 0 && inRect(hit, in.px, in.py) && clickGate) activeSlider = id;
+  if (!in.down) activeSlider = -1;
+  if (activeSlider == id) { v = clampf((in.mx - x) / w, 0.f, 1.f); sliderTouched = true; }
+  G.rrect(x, cy - U(5), w, U(10), U(5), 0x000000, 0.6f); G.gradRRect(x, cy - U(5), std::max(U(10), w * v), U(10), U(5), shadec(col, 0.25f), shadec(col, -0.15f), 1.f);
+  G.circle(x + w * v, cy + U(1.5f), U(13), 0x000000, 0.35f); G.circle(x + w * v, cy, U(12), 0x6a4a1a); G.circle(x + w * v, cy, U(10), activeSlider == id ? 0xfff0b0 : 0xe9c466); G.circle(x + w * v - U(2.5f), cy - U(3), U(3.5f), 0xffffff, 0.45f);
+  return v;
+}
 static void drawModal() {
+  sliderTouched = false;
   if (modal == M_NONE) return;
   float bx, by, bw, bh; modalFrame(0, 480, bx, by, bw, bh);
   float startY = by + U(20) - modalScroll; Flow f = flowAt(bx + U(20), startY, bw - U(40));
@@ -1228,8 +1239,13 @@ static void drawModal() {
       if (flowBtn(f, std::string("Music: ") + (S.musicOn ? "ON" : "OFF"), S.musicOn ? 1 : 0)) { S.musicOn = !S.musicOn; audioSetEnabled(S.musicOn, S.sfxOn); saveGame(); }
       if (flowBtn(f, std::string("Sound effects: ") + (S.sfxOn ? "ON" : "OFF"), S.sfxOn ? 1 : 0)) { S.sfxOn = !S.sfxOn; audioSetEnabled(S.musicOn, S.sfxOn); saveGame(); }
       flowNl(f);
+      { float labw = U(150), sw = f.maxW - labw - U(70); float prevM = S.musicVol, prevS = S.sfxVol;
+        G.text("Music volume", f.x0, f.y + U(7), F_M, C_TXT); S.musicVol = slider(1, f.x0 + labw, f.y, sw, S.musicVol, 0xe9c466); G.text(std::to_string((int)std::round(S.musicVol * 100)) + "%", f.x0 + labw + sw + U(18), f.y + U(8), F_S, C_DIM); f.y += U(42);
+        G.text("Effects volume", f.x0, f.y + U(7), F_M, C_TXT); S.sfxVol = slider(2, f.x0 + labw, f.y, sw, S.sfxVol, 0x8ac0f0); G.text(std::to_string((int)std::round(S.sfxVol * 100)) + "%", f.x0 + labw + sw + U(18), f.y + U(8), F_S, C_DIM); f.y += U(46);
+        if (S.musicVol != prevM || S.sfxVol != prevS) { audioSetVolumes(S.musicVol, S.sfxVol); static float clickT = 0; if (S.sfxVol != prevS && SDL_GetTicks() / 1000.f - clickT > 0.18f) { clickT = SDL_GetTicks() / 1000.f; audioPlay(SFX_PLACE); } }
+        static bool wasSliding = false; if (wasSliding && activeSlider < 0) saveGame(); wasSliding = activeSlider >= 0; }
       if (!audioDeviceOpen()) flowPara(f, "No audio output device was found, so the game is silent.", C_BAD, F_S);
-      flowPara(f, "Season " + std::to_string(S.season) + " ends in " + fmtTime(seasonLeft()) + ". All music and sound is generated on your device; the game never goes online.", C_DIM, F_S);
+      flowPara(f, "Season " + std::to_string(S.season) + " ends in " + fmtTime(seasonLeft()) + ". The music plays from files on your device and the effects are generated; the game never goes online.", C_DIM, F_S);
       flowPara(f, "Controls: drag = pan, wheel / pinch = zoom, tap = select / place / deploy. Dev keys: F1 resources, F2 raid, F3 town center level, F4 end the season.", C_DIM, F_S);
       flowTitle(f, "Realm", C_GOLD, F_M);
       flowPara(f, "Prestige " + std::to_string(S.meta.prestige) + "  -  " + std::to_string(S.meta.points) + " point(s). " + (prestigeAvailable() ? "Your Town Center is at the maximum level: you may ascend." : "Reach Town Center Lv" + std::to_string(MAXTC) + " to ascend."), C_DIM, F_S);
@@ -1248,7 +1264,7 @@ static void drawModal() {
     if (uiButton(bx + bw - xs - U(10), by + U(10), xs, xs, "X", 2, true, F_M)) modal = M_NONE;
   }
   // scrolling by drag inside the modal
-  if (in.down && in.dragged && inRect({bx, by, bw, bh}, in.px, in.py)) modalScroll -= in.my - in.lasty;
+  if (in.down && in.dragged && inRect({bx, by, bw, bh}, in.px, in.py) && !sliderTouched && activeSlider < 0) modalScroll -= in.my - in.lasty;
 }
 
 static void drawPanel() {
@@ -1605,7 +1621,18 @@ static void updateWorld(float dt) {
   if (std::fabs(vTarget - vAng) > 1e-4f) { float na = vAng + (vTarget - vAng) * std::min(1.f, dt * 9.f); if (std::fabs(vTarget - na) < 0.004f) na = vTarget; setViewAngle(na); }
   clampCam();
   fxUpdate(dt); if (shakeAmp > 0) shakeAmp = std::max(0.f, shakeAmp - dt * 14.f);
-  { static Track cur = MUS_NONE; Track want = view == V_BATTLE ? MUS_BATTLE : MUS_VILLAGE; if (want != cur) { cur = want; audioMusic(want); } }
+  { static Track cur = MUS_NONE; Track want = view == V_BATTLE ? MUS_BATTLE : MUS_VILLAGE;
+    if (want != cur) {
+      cur = want;
+      if (want == MUS_BATTLE) {                                           // pick fight music by the size of the battle
+        int sz = 1; bool def = B.kind == K_DEFENCE, imp = false;
+        if (def || replaying && B.kind == K_DEFENCE) { int n = (int)B.sim.sq.size() + (int)B.sim.units.size(); sz = n < 14 ? 0 : n < 36 ? 1 : 2; imp = B.sim.atkTc >= 8; }
+        else { int nb = 0; for (auto& sb : B.sim.b) if (!sb.wall && !sb.trap) nb++; int nd = 0; for (auto& u : B.sim.units) if (u.def) nd++; int score = nb + nd; sz = score <= 9 ? 0 : score <= 26 ? 1 : 2; imp = scout.tc >= 8; }
+        audioMusicContext(ageOf(tcLvl()), sz, def, imp);
+      } else audioMusicContext(ageOf(tcLvl()), 1, false, false);
+      audioMusic(want);
+    }
+    audioTick(); }
   if (view == V_HOME) {
     S.t += dt * speedMul; econTick(dt * speedMul); raidCheck();
     if (modal == M_NONE) { int asq, aen; if (squadArrival(asq, aen)) { if (findEnemy(aen)) { startEnemy(aen); scout.fromSquad = asq; toast("Your squad stands at the gates!"); } } }
@@ -1888,6 +1915,20 @@ static int smoke() {
     LOG("season %d ended: pos before %d, rank %s, reward gold %d, renown 4000 -> %d", oldSeason, posBefore, rankOf(sr.finalRenown), sr.reward.v[GOLD], S.renown);
     seasonRes = sr; modal = M_SEASON; frames(14); shot("22_season_modal"); modal = M_SETTINGS; frames(14); shot("23_options"); modal = M_NONE;
   }
+  {   // music playlists
+    int cnt[2][6] = {}; for (int i = 0; i < 400; i++) { cnt[0][audioPickSample(0, 0, 1, false, false)]++; } for (int i = 0; i < 6; i++) CHECK(true, "");
+    int dark = 0, imp = 0; for (int i = 0; i < 300; i++) { if (audioPickSample(0, 0, 1, false, false) == 1) dark++; if (audioPickSample(0, 3, 1, false, false) == 5) imp++; }
+    CHECK(dark > 60 && imp > 60, "village music follows the Age (Dark Age calm start, Imperial grand)");
+    int dfn = 0, light = 0, big = 0, gun = 0, kinds[6] = {}; for (int i = 0; i < 300; i++) { int k = audioPickSample(1, 2, 1, true, false); kinds[k]++; if (k == 4) dfn++; if (audioPickSample(1, 2, 0, false, false) == 1) light++; if (audioPickSample(1, 2, 2, false, false) == 3) big++; if (audioPickSample(1, 3, 1, false, true) == 5) gun++; }
+    int distinct = 0; for (int k = 0; k < 6; k++) if (kinds[k] > 0) distinct++;
+    CHECK(dfn > 90 && light > 70 && big > 70 && gun > 60 && distinct >= 4, "fight music follows battle size, defence and the Imperial age, but still varies");
+    audioSetEnabled(false, false);
+    auto waitTick = [&](std::function<bool()> done, int ms) { for (int t = 0; t < ms / 40; t++) { audioTick(); if (done()) return true; SDL_Delay(40); } audioTick(); return done(); };
+    int l0 = -1, l1 = -1, l2 = -1; audioMusic(MUS_VILLAGE); audioMusicContext(1, 1, false, false);
+    waitTick([&] { int l; return audioNowPlaying(l) >= 0 && l == 0; }, 7000); int t0 = audioNowPlaying(l0); CHECK(t0 >= 0 && l0 == 0, "a village track starts");
+    audioForceNext(); waitTick([&] { int l; int t = audioNowPlaying(l); return t >= 0 && l == 0 && t != t0; }, 7000); int t1 = audioNowPlaying(l1); CHECK(t1 >= 0 && l1 == 0 && t1 != t0, "when a track is about to end the next one is a different track");
+    audioMusic(MUS_BATTLE); audioMusicContext(2, 2, false, false); waitTick([&] { int l; return audioNowPlaying(l) >= 0 && l == 1; }, 9000); int t2 = audioNowPlaying(l2); CHECK(t2 >= 0 && l2 == 1, "a battle starts a fight track"); LOG("tracks: village %d -> %d, battle %d", t0, t1, t2);
+    audioMusic(MUS_VILLAGE); for (int i = 0; i < 5; i++) audioTick(); }
   { std::string rep; int bad = audioSelfTest(rep); LOG("audio device open: %d\n%s", (int)audioDeviceOpen(), rep.c_str()); CHECK(bad == 0, "all synthesised sounds and both music loops are audible and not empty"); }
   // ---------------- v2 content: camps, deploy margin, regrowing deposits, fog of war, exploring, hunting, outposts
   {
@@ -1972,7 +2013,7 @@ static int smoke() {
       saveGame(); Enemy sv = S.enemies[0]; S.enemies.clear(); bool lg = loadGame(); LOG("load: %d, enemies %d name '%s' vs '%s' seed %u vs %u tc %d vs %d", (int)lg, (int)S.enemies.size(), S.enemies.empty() ? "" : S.enemies[0].name.c_str(), sv.name.c_str(), S.enemies.empty() ? 0u : S.enemies[0].seed, sv.seed, S.enemies.empty() ? 0 : S.enemies[0].tc, sv.tc); CHECK(lg && S.enemies.size() >= 1 && S.enemies[0].name == sv.name && S.enemies[0].seed == sv.seed && S.enemies[0].tc == sv.tc, "rival lords are saved");
       { std::ifstream sf("smoke_save.txt", std::ios::binary); std::string txt((std::istreambuf_iterator<char>(sf)), std::istreambuf_iterator<char>()); sf.close();
         size_t rp = txt.find("RPL "); size_t cut = rp == std::string::npos ? std::string::npos : txt.rfind('\n', txt.rfind('\n', rp) - 1);
-        CHECK(txt.compare(0, 5, "DOK12") == 0 && cut != std::string::npos, "the save is the current version");
+        CHECK(txt.compare(0, 5, "DOK13") == 0 && cut != std::string::npos, "the save is the current version");
         if (cut != std::string::npos) { std::string old = "DOK6" + txt.substr(5, cut + 1 - 5); std::ofstream of("smoke_old.txt", std::ios::binary | std::ios::trunc); of << old; of.close(); std::string keep = g_savePath; g_savePath = "smoke_old.txt";
           bool okOld = loadGame(); g_savePath = keep; CHECK(okOld && S.enemies.size() >= 1 && S.replays.empty() && S.fog.size() == (size_t)WORLD * WORLD, "a save from before the four quadrants loads and gets a rival lord"); } }
       Pt c0 = iso(15.f, 15.f); (void)c0;
@@ -2028,6 +2069,7 @@ static int smoke() {
           Squad* q2 = findSquad(id2); q2->x = q2->tx = 30.f; q2->y = q2->ty = 30.f; int milBefore = S.army[U_MILITIA]; squadRecall(id2); for (int i = 0; i < 1500 && findSquad(id2); i++) { S.t += 0.1; econTick(0.1f); } CHECK(findSquad(id2) == nullptr && S.army[U_MILITIA] == milBefore + 2, "a recalled squad rejoins the army"); }
         { int cn3[U_COUNT] = {}; cn3[U_MILITIA] = 3; S.army[U_MILITIA] += 3; formSquad(cn3); Squad& q3 = S.squads.back(); sqSel = q3.id; float gx = q3.x, gy = q3.y, zm = 2.0f; cam.zoom = cam.zt = zm; cam.x = G.W / 2.f - (gx - gy) * TW / 2 * zm; cam.y = G.H / 2.f - (gx + gy) * TH / 2 * zm; cam.vx = cam.vy = 0; frames(6); shot("52_squad"); S.squads.clear(); sqSel = -1; centerCamera(); } }
       S.animals = savedA; S.army[U_MILITIA] = mil0; S.squads.clear(); }
+    { float mv0 = S.musicVol, sv0 = S.sfxVol; S.musicVol = 0.31f; S.sfxVol = 0.62f; saveGame(); S.musicVol = 1.f; S.sfxVol = 1.f; CHECK(loadGame() && std::fabs(S.musicVol - 0.31f) < 0.005f && std::fabs(S.sfxVol - 0.62f) < 0.005f, "volume settings are saved"); S.musicVol = mv0; S.sfxVol = sv0; audioSetVolumes(S.musicVol, S.sfxVol); }
     // lord colours and total ruin
     { for (int i = 0; i < 400 && S.enemies.empty(); i++) { S.enemyCheck = S.t - 1; econTick(0.1f); } CHECK(!S.enemies.empty(), "a new lord settles after one is wiped out"); std::vector<int> cols; for (auto& e : S.enemies) cols.push_back(e.color); bool uniq = true; for (size_t i = 0; i < cols.size(); i++) for (size_t j = i + 1; j < cols.size(); j++) if (cols[i] == cols[j]) uniq = false; CHECK(uniq && S.enemies[0].color >= 0 && S.enemies[0].color < NLORDCOL, "every living lord has his own colour");
       int c0 = S.enemies[0].color, id0 = S.enemies[0].id; saveGame(); S.enemies[0].color = (c0 + 1) % NLORDCOL; { bool lgc = loadGame(); LOG("colour reload: ok=%d enemy=%d color=%d want=%d n=%d", (int)lgc, findEnemy(id0) ? 1 : 0, findEnemy(id0) ? findEnemy(id0)->color : -1, c0, (int)S.enemies.size()); CHECK(lgc && findEnemy(id0) && findEnemy(id0)->color == c0, "a lord keeps his colour across save and load"); }
@@ -2137,7 +2179,7 @@ int main(int argc, char** argv) {
   audioInit();
   for (int i = 1; i + 1 < argc; i++) if (std::string(argv[i]) == "--export-audio") { int n = audioExportWav(argv[i + 1]); std::fprintf(stderr, "exported %d audio files\n", n); audioShutdown(); G.shutdown(); return n > 0 ? 0 : 1; }
   for (int i = 1; i < argc; i++) if (std::string(argv[i]) == "--smoke") { audioSetEnabled(false, false); int rc = smoke(); audioShutdown(); G.shutdown(); return rc; }
-  audioSetEnabled(false, false); boot(); audioSetEnabled(S.musicOn, S.sfxOn);
+  audioSetEnabled(false, false); boot(); audioSetEnabled(S.musicOn, S.sfxOn); audioSetVolumes(S.musicVol, S.sfxVol);
   Uint64 last = SDL_GetPerformanceCounter();
   while (running) {
     in.pressed = in.released = false; in.wheel = 0; in.lastx = in.mx; in.lasty = in.my;

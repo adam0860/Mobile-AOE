@@ -56,7 +56,7 @@ struct State {
   double t = 0; float res[NRES] = {400, 300, 100, 100}; int villagers = 3; std::vector<float> vq;
   int army[U_COUNT] = {}; int renown = 0; double shieldUntil = 0, nextRaid = 0; int nid = 1; uint32_t seed = 1;
   double camp[NCAMP + 1] = {}; int campWins[NCAMP + 1] = {}; int rivalSeq = 0; bool seenIntro = false; long long lastSeen = 0;
-  int season = 1; double seasonStart = 0; int sWins = 0, sDef = 0; bool musicOn = true, sfxOn = true;
+  int season = 1; double seasonStart = 0; int sWins = 0, sDef = 0; bool musicOn = true, sfxOn = true; float musicVol = 0.85f, sfxVol = 1.f;
   int wallLvl = 1, trapLvl = 1;      // shared level of all wall pieces / all traps
   int tech[T_COUNT] = {}; int researchTech = -1; double researchEnd = 0;
   std::deque<Bld> b; std::vector<Node> nodes;

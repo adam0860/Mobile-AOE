@@ -12,7 +12,7 @@ static std::vector<Lord> LORDS;
 static bool lordsBuilt = false;
 
 void newGame() {
-  Meta keepMeta = S.meta; S = State(); S.meta = keepMeta; LORDS.clear(); lordsBuilt = false;
+  Meta keepMeta = S.meta; bool kMo = S.musicOn, kSo = S.sfxOn; float kMv = S.musicVol, kSv = S.sfxVol; S = State(); S.meta = keepMeta; S.musicOn = kMo; S.sfxOn = kSo; S.musicVol = kMv; S.sfxVol = kSv; LORDS.clear(); lordsBuilt = false;
   Rng r((uint32_t)std::time(nullptr)); S.seed = (uint32_t)(r.next() * 1e9);
   S.lastSeen = (long long)std::time(nullptr);
   addB(B_TOWNHALL, 13, 13, 1); addB(B_HOUSE, 18, 13, 1); addB(B_TOWER, 13, 18, 1);
@@ -879,7 +879,7 @@ static std::string savePath() {
 void saveGame() {
   S.lastSeen = (long long)std::time(nullptr);
   std::ostringstream o; o.precision(9);
-  o << "DOK12 " << S.t << ' ' << S.villagers << ' ' << S.renown << ' ' << S.shieldUntil << ' ' << S.nextRaid << ' ' << S.nid << ' ' << S.seed << ' ' << S.rivalSeq << ' ' << (int)S.seenIntro << ' ' << S.lastSeen << '\n';
+  o << "DOK13 " << S.t << ' ' << S.villagers << ' ' << S.renown << ' ' << S.shieldUntil << ' ' << S.nextRaid << ' ' << S.nid << ' ' << S.seed << ' ' << S.rivalSeq << ' ' << (int)S.seenIntro << ' ' << S.lastSeen << '\n';
   for (int i = 0; i < NRES; i++) o << S.res[i] << ' '; o << '\n';
   o << (int)U_COUNT << ' '; for (int i = 0; i < U_COUNT; i++) o << S.army[i] << ' '; o << '\n';
   o << NCAMP << ' '; for (int i = 0; i <= NCAMP; i++) o << S.camp[i] << ' '; for (int i = 0; i <= NCAMP; i++) o << S.campWins[i] << ' '; o << '\n';
@@ -913,12 +913,13 @@ void saveGame() {
   o << S.meta.prestige << ' ' << S.meta.points << ' ' << S.meta.unlocked << ' ' << S.relicsHeld << ' ' << S.betrayals << ' ' << S.relicCheck << ' ' << S.relics.size() << '\n';
   for (auto& rl : S.relics) o << rl.id << ' ' << rl.x << ' ' << rl.y << '\n';
   o << S.squads.size() << '\n'; for (auto& q : S.squads) { o << q.id << ' ' << q.x << ' ' << q.y << ' ' << q.tx << ' ' << q.ty << ' ' << (int)q.go << ' ' << (int)q.recall << ' ' << q.mode << ' ' << q.target << ' ' << q.gx << ' ' << q.gy << ' ' << q.u.size(); for (auto& u : q.u) o << ' ' << u.type << ' ' << u.hp; o << '\n'; }
+  o << S.musicVol << ' ' << S.sfxVol << '\n';
   std::ofstream f(savePath(), std::ios::binary | std::ios::trunc); f << o.str();
 }
 bool loadGame() {
   std::ifstream f(savePath(), std::ios::binary); if (!f) return false;
-  std::string magic; f >> magic; if (magic != "DOK1" && magic != "DOK2" && magic != "DOK3" && magic != "DOK4" && magic != "DOK5" && magic != "DOK6" && magic != "DOK7" && magic != "DOK8" && magic != "DOK9" && magic != "DOK10" && magic != "DOK11" && magic != "DOK12") return false;
-  bool dok12 = magic == "DOK12", dok11 = magic == "DOK11" || dok12, dok10 = magic == "DOK10" || dok11, dok9 = magic == "DOK9" || dok10, dok8 = magic == "DOK8" || dok9, dok7 = magic == "DOK7" || dok8; if (dok7) magic = "DOK6";
+  std::string magic; f >> magic; if (magic != "DOK1" && magic != "DOK2" && magic != "DOK3" && magic != "DOK4" && magic != "DOK5" && magic != "DOK6" && magic != "DOK7" && magic != "DOK8" && magic != "DOK9" && magic != "DOK10" && magic != "DOK11" && magic != "DOK12" && magic != "DOK13") return false;
+  bool dok13 = magic == "DOK13", dok12 = magic == "DOK12" || dok13, dok11 = magic == "DOK11" || dok12, dok10 = magic == "DOK10" || dok11, dok9 = magic == "DOK9" || dok10, dok8 = magic == "DOK8" || dok9, dok7 = magic == "DOK7" || dok8; if (dok7) magic = "DOK6";
   int armyN = magic == "DOK1" ? 3 : 9;
   State n; int seen = 0;
   f >> n.t >> n.villagers >> n.renown >> n.shieldUntil >> n.nextRaid >> n.nid >> n.seed >> n.rivalSeq >> seen >> n.lastSeen; n.seenIntro = seen;
@@ -970,6 +971,7 @@ bool loadGame() {
   if (dok8) { int np = 0, uc = U_COUNT; f >> np; for (int p = 0; p < np; p++) for (int i = 0; i < uc; i++) { int v; f >> v; if (p < NPRESET) n.presets[p][i] = v; } }
   if (dok10) { size_t nr = 0; f >> n.meta.prestige >> n.meta.points >> n.meta.unlocked >> n.relicsHeld >> n.betrayals >> n.relicCheck >> nr; for (size_t i = 0; i < nr; i++) { Relic rl; f >> rl.id >> rl.x >> rl.y; n.relics.push_back(rl); } }
   if (dok11) { size_t ns = 0; f >> ns; for (size_t i = 0; i < ns && f; i++) { Squad q; int go, rc; size_t nu; f >> q.id >> q.x >> q.y >> q.tx >> q.ty >> go >> rc >> q.mode >> q.target >> q.gx >> q.gy >> nu; q.go = go; q.recall = rc; for (size_t k = 0; k < nu; k++) { SqUnit u; f >> u.type >> u.hp; q.u.push_back(u); } n.squads.push_back(q); } }
+  if (dok13) f >> n.musicVol >> n.sfxVol;
   if (!f || n.b.empty()) return false;
   S = n;
   if (magic != "DOK6") genWorld(); else if (!dok9) genWorldOldSave();

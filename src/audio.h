@@ -10,8 +10,14 @@ bool audioInit();                         // synthesises the buffers; returns fa
 void audioShutdown();
 bool audioDeviceOpen();
 void audioPlay(Sfx s, float vol = 1.f);   // rate-limited per effect so battles don't turn into noise
-void audioMusic(Track t);                 // crossfades to the requested loop
+void audioMusic(Track t);                 // village or battle: crossfades to a track from that playlist
+void audioMusicContext(int age, int battleSize, bool defence, bool imperial);   // steers the picks: Age 0-3, battle size 0 light / 1 standard / 2 big
+int audioNowPlaying(int& list);              // test hooks: index of the playing track in its playlist (-1 none, -2 synthesised)
+void audioForceNext();
+int audioPickSample(int list, int age, int size, bool defence, bool imperial);
+void audioTick();                         // once per frame: starts the next track when the current one is about to end
 void audioSetEnabled(bool music, bool sfx);
+void audioSetVolumes(float music, float sfx);   // 0..1 each
 // self-test: number of generated buffers that are silent or clipped (0 = all good); report lists levels
 int audioSelfTest(std::string& report);
 // writes every effect and both music loops as 16-bit mono WAV files so they can be auditioned outside the game

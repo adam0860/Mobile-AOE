@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <vector>
+#include <ctime>
+#include <new>
 #define DR_MP3_IMPLEMENTATION
 #include "../third_party/dr/dr_mp3.h"
 
@@ -131,55 +133,68 @@ Buf genBattle() {
 
 // ------------------------------------------------------------------ engine
 // Device: 44.1 kHz stereo.  Effects are synthesised mono @22.05 kHz (played with linear interpolation).
-// Music: assets/music_village.mp3 and assets/music_raid.mp3 are streamed (decoded on the fly, looped); if they are missing the synthesised loops are used.
+// Music: two "decks" stream mp3 files and crossfade.  Village tracks and battle tracks each form a playlist; the next track is picked at random
+// (weighted by Age / time of day for the village, by battle size / defence / Imperial for fights, never repeating the last two), and a track that is about to
+// end fades into the next one.  If no mp3 can be found the synthesised loops are used.
 constexpr int DEV_RATE = 44100;
 struct Voice { const int16_t* data = nullptr; size_t len = 0; float pos = 0, vol = 0; };
 struct MStream {
-  drmp3 dec; std::vector<unsigned char> file; bool ok = false; std::vector<int16_t> blk; int blkCount = 0, blkIdx = 0, ch = 2; double ratio = 1, frac = 0; float p[2] = {0, 0}, n[2] = {0, 0};
+  drmp3 dec; std::vector<unsigned char> file; bool ok = false, eof = false; std::vector<int16_t> blk; int blkCount = 0, blkIdx = 0, ch = 2; double ratio = 1, frac = 0; float p[2] = {0, 0}, n[2] = {0, 0};
   bool fetch(float& l, float& r) {
-    if (blkIdx >= blkCount) { blkCount = (int)drmp3_read_pcm_frames_s16(&dec, 2048, blk.data()); blkIdx = 0; if (blkCount <= 0) { drmp3_seek_to_pcm_frame(&dec, 0); blkCount = (int)drmp3_read_pcm_frames_s16(&dec, 2048, blk.data()); if (blkCount <= 0) return false; } }
+    if (eof) return false;
+    if (blkIdx >= blkCount) { blkCount = (int)drmp3_read_pcm_frames_s16(&dec, 2048, blk.data()); blkIdx = 0; if (blkCount <= 0) { eof = true; return false; } }
     const int16_t* q = &blk[(size_t)blkIdx * ch]; blkIdx++; l = q[0] / 32768.f; r = (ch > 1 ? q[1] : q[0]) / 32768.f; return true;
   }
   bool open(const std::string& path) {
     size_t sz = 0; void* d = SDL_LoadFile(path.c_str(), &sz); if (!d) return false; file.assign((unsigned char*)d, (unsigned char*)d + sz); SDL_free(d);
-    if (!drmp3_init_memory(&dec, file.data(), file.size(), nullptr)) return false;
-    ch = (int)dec.channels; ratio = (double)dec.sampleRate / DEV_RATE; blk.assign(2048 * std::max(1, ch), 0); blkCount = blkIdx = 0; ok = fetch(n[0], n[1]); frac = 0; if (ok) { p[0] = n[0]; p[1] = n[1]; fetch(n[0], n[1]); } return ok;
+    if (!drmp3_init_memory(&dec, file.data(), file.size(), nullptr)) { file.clear(); return false; }
+    ch = (int)dec.channels; ratio = (double)dec.sampleRate / DEV_RATE; blk.assign(2048 * std::max(1, ch), 0); blkCount = blkIdx = 0; eof = false; ok = fetch(n[0], n[1]); frac = 0; if (ok) { p[0] = n[0]; p[1] = n[1]; fetch(n[0], n[1]); } return ok;
   }
+  void close() { if (ok) drmp3_uninit(&dec); ok = false; file.clear(); file.shrink_to_fit(); blk.clear(); blk.shrink_to_fit(); }
   void frame(float& l, float& r) {
     l = p[0] + (n[0] - p[0]) * (float)frac; r = p[1] + (n[1] - p[1]) * (float)frac; frac += ratio;
     while (frac >= 1.0) { p[0] = n[0]; p[1] = n[1]; if (!fetch(n[0], n[1])) { n[0] = n[1] = 0; } frac -= 1.0; }
   }
 };
+struct Deck { MStream ms; bool active = false, loaded = false, synth = false; float vol = 0, target = 0, step = 0; uint64_t played = 0, total = 0; size_t spos = 0; int list = 0, idx = -1; };
+Deck decks[2]; int curDeck = -1; bool needNext = false, modeChanged = false;
+Track wantMode = MUS_NONE;
+int ctxAge = 0, ctxSize = 1; bool ctxDefence = false, ctxImperial = false;
 std::vector<int16_t> sfxData[SFX_COUNT];
-std::vector<int16_t> musData[3];            // synthesised fallback loops (generated only when an mp3 is missing)
-MStream streams[3]; bool streamLoaded = false;
+std::vector<int16_t> musData[3];            // synthesised fallback loops (generated only when no mp3 can be found)
 Voice voices[24];
 SDL_AudioDeviceID dev = 0;
-bool musicOn = true, sfxOn = true;
-Track wantTrack = MUS_NONE; float musVol[3] = {0, 0, 0}; size_t musPos[3] = {0, 0, 0};
+bool musicOn = true, sfxOn = true; float musicVolume = 0.85f, sfxVolume = 1.f;
 uint32_t lastPlay[SFX_COUNT] = {};
 const uint32_t minGap[SFX_COUNT] = {25, 40, 100, 100, 70, 55, 160, 130, 140, 90, 350, 50, 800, 800, 800, 800, 80};
 std::vector<int16_t> toPcm(const Buf& b) { std::vector<int16_t> o(b.size()); for (size_t i = 0; i < b.size(); i++) o[i] = (int16_t)(std::max(-1.f, std::min(1.f, b[i])) * 32000.f); return o; }
+
+const char* PLAYLIST[2][6] = {
+  {"music_village.mp3", "music_village_dark.mp3", "music_village_day.mp3", "music_village_evening.mp3", "music_village_feudal.mp3", "music_village_imperial.mp3"},
+  {"music_raid.mp3", "music_battle_light.mp3", "music_battle_standard.mp3", "music_battle_big.mp3", "music_battle_defence.mp3", "music_battle_imperial.mp3"}};
+int history[2][2] = {{-1, -1}, {-1, -1}}; bool missing[2][6] = {};
 
 void SDLCALL mixer(void*, Uint8* stream, int len) {
   int16_t* out = (int16_t*)stream; int n = len / 4;
   for (int i = 0; i < n; i++) {
     float L = 0, R = 0;
-    for (int tr = 1; tr <= 2; tr++) {
-      float target = (musicOn && wantTrack == tr) ? 1.f : 0.f; float& v = musVol[tr];
-      const float step = 1.f / (DEV_RATE * 1.5f);                      // 1.5 s crossfade
-      if (v < target) v = std::min(target, v + step); else if (v > target) v = std::max(target, v - step);
-      if (v <= 0.001f) continue;
-      if (streams[tr].ok) { float l, r; streams[tr].frame(l, r); L += l * v * 0.8f; R += r * v * 0.8f; }
-      else if (!musData[tr].empty()) { float m = musData[tr][musPos[tr] / 2] / 32768.f * v * 0.38f; musPos[tr]++; if (musPos[tr] / 2 >= musData[tr].size()) musPos[tr] = 0; L += m; R += m; }
+    for (Deck& d : decks) {
+      if (!d.active) continue;
+      if (d.vol < d.target) d.vol = std::min(d.target, d.vol + d.step); else if (d.vol > d.target) d.vol = std::max(d.target, d.vol - d.step);
+      if (d.target == 0.f && d.vol <= 0.0005f) { d.active = false; continue; }
+      float l = 0, r = 0;
+      if (d.synth) { const std::vector<int16_t>& md = musData[d.list + 1]; if (!md.empty()) { float m = md[d.spos / 2] / 32768.f * 0.38f; d.spos++; if (d.spos / 2 >= md.size()) d.spos = 0; l = r = m; } }
+      else { d.ms.frame(l, r); d.played++; if (d.ms.eof) { d.target = 0.f; d.step = std::max(d.step, 1.f / (DEV_RATE * 0.05f)); } }
+      if (musicOn) { L += l * d.vol * 0.8f * musicVolume; R += r * d.vol * 0.8f * musicVolume; }
     }
     if (sfxOn) for (Voice& vo : voices) if (vo.data) {
-      size_t i0 = (size_t)vo.pos; float fr = vo.pos - i0; float a = vo.data[i0] / 32768.f, b = i0 + 1 < vo.len ? vo.data[i0 + 1] / 32768.f : a; float m = (a + (b - a) * fr) * vo.vol; L += m; R += m;
+      size_t i0 = (size_t)vo.pos; float fr = vo.pos - i0; float a = vo.data[i0] / 32768.f, b = i0 + 1 < vo.len ? vo.data[i0 + 1] / 32768.f : a; float m = (a + (b - a) * fr) * vo.vol * sfxVolume; L += m; R += m;
       vo.pos += 0.5f; if (vo.pos >= vo.len - 1) vo.data = nullptr;
     }
     L = std::max(-1.f, std::min(1.f, L)); R = std::max(-1.f, std::min(1.f, R));
     out[i * 2] = (int16_t)(L * 30000.f); out[i * 2 + 1] = (int16_t)(R * 30000.f);
   }
+  if (curDeck >= 0 && decks[curDeck].active && !decks[curDeck].synth && !needNext && decks[curDeck].target > 0.f && decks[curDeck].total > 0 && decks[curDeck].played + (uint64_t)(DEV_RATE * 3.8) >= decks[curDeck].total) needNext = true;
 }
 std::string musicPath(const char* f) {
 #ifdef __ANDROID__
@@ -188,23 +203,88 @@ std::string musicPath(const char* f) {
   char* bp = SDL_GetBasePath(); std::string base = bp ? bp : ""; if (bp) SDL_free(bp); return base + "assets/" + f;
 #endif
 }
+// weighted random pick that favours tracks matching the situation and avoids the last two played
+int pickTrack(int list) {
+  float w[6]; int hour = 12; { std::time_t tt = std::time(nullptr); std::tm* lt = std::localtime(&tt); if (lt) hour = lt->tm_hour; } bool night = hour >= 19 || hour < 5;
+  for (int k = 0; k < 6; k++) {
+    float v = 1.f;
+    if (list == 0) {
+      switch (k) {
+        case 1: v = ctxAge == 0 ? 4.f : ctxAge == 1 ? 2.5f : 0.4f; break;
+        case 2: v = night ? 0.8f : 2.4f; break;
+        case 3: v = night ? 3.5f : 0.5f; break;
+        case 4: v = (ctxAge == 1 || ctxAge == 2) ? 3.f : 0.5f; break;
+        case 5: v = ctxAge >= 3 ? 4.f : 0.25f; break;
+        default: v = 1.f;
+      }
+    } else {
+      int s = ctxSize;
+      switch (k) {
+        case 1: v = s == 0 ? 3.f : s == 1 ? 1.f : 0.3f; break;
+        case 2: v = s == 0 ? 1.f : s == 1 ? 3.f : 1.5f; break;
+        case 3: v = s == 0 ? 0.3f : s == 1 ? 1.5f : 3.f; break;
+        case 4: v = ctxDefence ? 4.5f : 0.15f; break;
+        case 5: v = ctxImperial ? 3.5f : 0.3f; break;
+        default: v = 1.f;
+      }
+    }
+    if (missing[list][k]) v = 0.f;
+    if (k == history[list][0]) v *= 0.02f; if (k == history[list][1]) v *= 0.25f;
+    w[k] = v;
+  }
+  float tot = 0; for (float v : w) tot += v; if (tot <= 0) return -1;
+  float r = (float)(std::rand() % 10000) / 10000.f * tot; for (int k = 0; k < 6; k++) { r -= w[k]; if (r <= 0) return k; }
+  return 5;
+}
 }  // namespace
 
 bool audioInit() {
   for (int i = 0; i < SFX_COUNT; i++) { Buf b = genSfx(i); for (int pass = 0; pass < 2; pass++) { float lp = 0; for (float& v : b) { lp += (v - lp) * 0.62f; v = lp; } } normalize(b, i == SFX_CLICK || i == SFX_ARROW ? 0.5f : 0.75f); sfxData[i] = toPcm(b); }
-  streams[MUS_VILLAGE].open(musicPath("music_village.mp3")); streams[MUS_BATTLE].open(musicPath("music_raid.mp3"));
-  if (!streams[MUS_VILLAGE].ok) musData[MUS_VILLAGE] = toPcm(genVillage());
-  if (!streams[MUS_BATTLE].ok) musData[MUS_BATTLE] = toPcm(genBattle());
   if (!SDL_WasInit(SDL_INIT_AUDIO) && SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) { std::fprintf(stderr, "audio init: %s\n", SDL_GetError()); return false; }
   SDL_AudioSpec want{}, have{}; want.freq = DEV_RATE; want.format = AUDIO_S16SYS; want.channels = 2; want.samples = 1024; want.callback = mixer;
   dev = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
   if (!dev) { std::fprintf(stderr, "audio device: %s\n", SDL_GetError()); return false; }
   SDL_PauseAudioDevice(dev, 0); return true;
 }
-void audioShutdown() { if (dev) { SDL_CloseAudioDevice(dev); dev = 0; } }
+void audioShutdown() { if (dev) { SDL_CloseAudioDevice(dev); dev = 0; } for (Deck& d : decks) { d.ms.close(); d.loaded = false; d.active = false; } }
 bool audioDeviceOpen() { return dev != 0; }
 void audioSetEnabled(bool music, bool sfx) { if (dev) SDL_LockAudioDevice(dev); musicOn = music; sfxOn = sfx; if (dev) SDL_UnlockAudioDevice(dev); }
-void audioMusic(Track t) { if (dev) SDL_LockAudioDevice(dev); wantTrack = t; if (dev) SDL_UnlockAudioDevice(dev); }
+void audioSetVolumes(float music, float sfx) { if (dev) SDL_LockAudioDevice(dev); musicVolume = std::max(0.f, std::min(1.f, music)); sfxVolume = std::max(0.f, std::min(1.f, sfx)); if (dev) SDL_UnlockAudioDevice(dev); }
+void audioMusic(Track t) { if (dev) SDL_LockAudioDevice(dev); if (t != wantMode) { wantMode = t; modeChanged = true; } if (dev) SDL_UnlockAudioDevice(dev); }
+void audioMusicContext(int age, int battleSize, bool defence, bool imperial) { if (dev) SDL_LockAudioDevice(dev); ctxAge = age; ctxSize = battleSize; ctxDefence = defence; ctxImperial = imperial; if (dev) SDL_UnlockAudioDevice(dev); }
+// called once per frame from the main thread: frees finished decks, and starts the next track (mode change or the current one is about to end)
+void audioTick() {
+  if (!dev) return;
+  SDL_LockAudioDevice(dev);
+  for (Deck& d : decks) if (!d.active && d.loaded) { d.ms.close(); d.loaded = false; d.synth = false; }
+  bool nn = needNext, ch = modeChanged; Track wm = wantMode; int cur = curDeck;
+  SDL_UnlockAudioDevice(dev);
+  if (wm == MUS_NONE) return;
+  if (!ch && !nn && cur >= 0 && decks[cur].active) return;
+  int slot = -1; for (int k = 0; k < 2; k++) if (!decks[k].active && !decks[k].loaded) { slot = k; break; }
+  if (slot < 0) return;                                              // both decks are still busy fading: try again next frame
+  int list = wm == MUS_BATTLE ? 1 : 0, idx = -1; Deck& nd = decks[slot];      // opened in place: the decoder keeps a pointer to itself, so it must never be moved
+  for (int tries = 0; tries < 6 && idx < 0; tries++) {
+    int k = pickTrack(list); if (k < 0) break;
+    if (nd.ms.open(musicPath(PLAYLIST[list][k]))) { idx = k; break; }
+    missing[list][k] = true;
+  }
+  float fadeSec = ch ? 1.6f : 3.6f;
+  if (idx >= 0) {
+    uint64_t frames = drmp3_get_pcm_frame_count(&nd.ms.dec); nd.total = (uint64_t)((double)frames * DEV_RATE / std::max<drmp3_uint32>(1, nd.ms.dec.sampleRate));
+    drmp3_seek_to_pcm_frame(&nd.ms.dec, 0); nd.ms.blkCount = nd.ms.blkIdx = 0; nd.ms.eof = false; nd.ms.fetch(nd.ms.n[0], nd.ms.n[1]); nd.ms.p[0] = nd.ms.n[0]; nd.ms.p[1] = nd.ms.n[1]; nd.ms.fetch(nd.ms.n[0], nd.ms.n[1]); nd.ms.frac = 0;
+    history[list][1] = history[list][0]; history[list][0] = idx;
+  } else {                                                           // no mp3 at all: fall back to the synthesised loop
+    if (musData[list + 1].empty()) musData[list + 1] = toPcm(list == 0 ? genVillage() : genBattle());
+    nd.synth = true;
+  }
+  SDL_LockAudioDevice(dev);
+  Deck& dst = nd; dst.synth = idx < 0; dst.loaded = idx >= 0; if (idx < 0) dst.total = 0; dst.played = 0; dst.spos = 0; dst.list = list; dst.idx = idx;
+  dst.vol = 0; dst.target = 1; dst.step = 1.f / (DEV_RATE * fadeSec); dst.active = true;
+  if (cur >= 0 && decks[cur].active) { decks[cur].target = 0; decks[cur].step = 1.f / (DEV_RATE * fadeSec); }
+  curDeck = slot; needNext = false; modeChanged = false;
+  SDL_UnlockAudioDevice(dev);
+}
 void audioPlay(Sfx s, float vol) {
   if (!dev || !sfxOn || s < 0 || s >= SFX_COUNT || sfxData[s].empty()) return;
   uint32_t now = SDL_GetTicks(); if (now - lastPlay[s] < minGap[s]) return; lastPlay[s] = now;
@@ -214,6 +294,9 @@ void audioPlay(Sfx s, float vol) {
   slot->data = sfxData[s].data(); slot->len = sfxData[s].size(); slot->pos = 0.f; slot->vol = 0.55f * vol;
   SDL_UnlockAudioDevice(dev);
 }
+int audioNowPlaying(int& list) { if (!dev || curDeck < 0 || !decks[curDeck].active) return -1; list = decks[curDeck].list; return decks[curDeck].synth ? -2 : decks[curDeck].idx; }
+void audioForceNext() { if (dev) SDL_LockAudioDevice(dev); needNext = true; if (dev) SDL_UnlockAudioDevice(dev); }
+int audioPickSample(int list, int age, int size, bool defence, bool imperial) { int a0 = ctxAge, s0 = ctxSize; bool d0 = ctxDefence, i0 = ctxImperial; int h0 = history[list][0], h1 = history[list][1]; history[list][0] = history[list][1] = -1; ctxAge = age; ctxSize = size; ctxDefence = defence; ctxImperial = imperial; int r = pickTrack(list); ctxAge = a0; ctxSize = s0; ctxDefence = d0; ctxImperial = i0; history[list][0] = h0; history[list][1] = h1; return r; }
 int audioSelfTest(std::string& report) {
   static const char* names[SFX_COUNT] = {"click", "place", "built", "coin", "hit", "arrow", "bolt", "cannon", "collapse", "trap", "heal", "deploy", "horn", "fanfare", "victory", "defeat", "error"};
   int bad = 0; char line[96];
@@ -223,11 +306,10 @@ int audioSelfTest(std::string& report) {
     std::snprintf(line, sizeof line, "sfx %-9s %.2fs peak %.2f rms %.3f\n", names[i], sfxData[i].size() / (float)RATE, peak / 32768.0, rms / 32768.0); report += line;
     if (peak < 3000 || rms < 100) bad++;
   }
-  for (int t = 1; t <= 2; t++) {
-    if (streams[t].ok) { std::snprintf(line, sizeof line, "music %d streaming mp3 (%d Hz, %d ch)\n", t, (int)streams[t].dec.sampleRate, streams[t].ch); report += line; continue; }
-    int peak = 0; double rms = 0; for (int16_t v : musData[t]) { peak = std::max(peak, std::abs((int)v)); rms += (double)v * v; } rms = std::sqrt(rms / std::max<size_t>(1, musData[t].size()));
-    std::snprintf(line, sizeof line, "music %d (synth fallback) %.1fs peak %.2f rms %.3f\n", t, musData[t].size() / (float)RATE, peak / 32768.0, rms / 32768.0); report += line;
-    if (musData[t].size() < (size_t)RATE * 10 || peak < 3000 || rms < 300) bad++;
+  for (int l = 0; l < 2; l++) {
+    int found = 0; for (int k = 0; k < 6; k++) { MStream ms; if (ms.open(musicPath(PLAYLIST[l][k]))) { found++; ms.close(); } }
+    std::snprintf(line, sizeof line, "%s playlist: %d of 6 mp3 tracks found\n", l == 0 ? "village" : "battle", found); report += line;
+    if (found == 0) { if (musData[l + 1].empty()) musData[l + 1] = toPcm(l == 0 ? genVillage() : genBattle()); int peak = 0; for (int16_t v : musData[l + 1]) peak = std::max(peak, std::abs((int)v)); if (peak < 3000) bad++; }
   }
   return bad;
 }
@@ -243,7 +325,9 @@ int audioExportWav(const std::string& dir) {
   };
   int n = 0;
   for (int i = 0; i < SFX_COUNT; i++) if (writeWav(dir + "/sfx_" + names[i] + ".wav", sfxData[i])) n++;
-  if (!musData[MUS_VILLAGE].empty() && writeWav(dir + "/music_village.wav", musData[MUS_VILLAGE])) n++;
-  if (!musData[MUS_BATTLE].empty() && writeWav(dir + "/music_battle.wav", musData[MUS_BATTLE])) n++;
+  if (musData[MUS_VILLAGE].empty()) musData[MUS_VILLAGE] = toPcm(genVillage());
+  if (musData[MUS_BATTLE].empty()) musData[MUS_BATTLE] = toPcm(genBattle());
+  if (writeWav(dir + "/music_village.wav", musData[MUS_VILLAGE])) n++;
+  if (writeWav(dir + "/music_battle.wav", musData[MUS_BATTLE])) n++;
   return n;
 }
