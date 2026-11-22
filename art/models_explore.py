@@ -107,3 +107,19 @@ def m_chest():
         a = i * 0.9
         sphere(0.38 + math.cos(a) * 0.12, math.sin(a) * 0.2, 0.03, 0.045, M['gold'], sz=0.35, seg=7)
     sphere(0.0, 0.0, 0.3, 0.2, M['gold'], sx=1.3, sy=0.8, sz=0.35, seg=8)
+
+
+def m_relic():
+    # a golden reliquary on a small stone plinth (the old-world relics monks fetch)
+    box(0, 0, 0, 0.56, 0.56, 0.07, M['stoneDark'])
+    box(0, 0, 0.07, 0.46, 0.46, 0.06, M['stone'])
+    box(0, 0, 0.13, 0.34, 0.34, 0.2, M['marble'])
+    box(0, 0, 0.33, 0.4, 0.4, 0.04, M['gold'])
+    box(0, 0, 0.37, 0.3, 0.3, 0.22, M['gold'])
+    for s in (-1, 1):
+        box(0.16 * s, 0, 0.4, 0.02, 0.2, 0.14, M['white'])
+        box(0, 0.16 * s, 0.4, 0.2, 0.02, 0.14, M['white'])
+    prism_roof(0, 0, 0.59, 0.3, 0.3, 0.2, M['gold'], over=0.05, along='x')
+    cone(0, 0, 0.8, 0.035, 0.12, M['gold'], verts=6)
+    sphere(0.17, 0.0, 0.46, 0.035, M['blue'], seg=6)
+    box(0.0, 0.0, 0.0, 0.7, 0.7, 0.02, M['dirt'])

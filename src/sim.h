@@ -23,13 +23,13 @@ struct Sim {
   std::vector<SimB> b; std::vector<SimUnit> units; std::vector<Proj> proj; std::vector<Spawn> sq;
   float t = 0, timeLeft = 180; bool started = false, over = false, defence = false; int nid = 1;
   SideMul mul[2];                       // [0] = attackers, [1] = defenders
-  int atkTc = 1, atkDiff = 0;           // NPC raids: the attacker's Town Center level and how far it is above (+) / below (-) yours
+  int atkTc = 1, atkDiff = 0, atkEnemy = -1; std::string atkName;           // NPC raids: the attacker's Town Center level and how far it is above (+) / below (-) yours
   std::vector<SimEvent> events;         // audio/visual events raised this step (drained by the app)
   std::vector<Corpse> corpses;          // fallen units fading out
   void emit(int type, float x, float y) { events.push_back({type, x, y}); }
   std::function<int()> reserve;         // undeployed fighters the attacker still holds
   // wall grid (rebuilt every step): index of the standing wall/gate piece on each tile, or -1
-  std::vector<int> wallIdx = std::vector<int>(MAP * MAP, -1); int gridVer = 0, lastWalls = -1;
+  std::vector<int> wallIdx = std::vector<int>(SIMN * SIMN, -1); int gridVer = 0, lastWalls = -1;
 
   void deploy(UType type, float x, float y, bool def = false);
   void spawnGarrisons();                // castle garrisons come out to fight

@@ -71,12 +71,42 @@ static const int MAXN[B_COUNT][MAXTC] = {
   {2, 3, 4, 5, 6, 7, 8, 9, 10, 10},      // mill
 };
 
+// buildings allowed OUTSIDE the village per Town Center level (outposts): economy camps, defences and a few walls/traps
+static const int OUTN[B_COUNT][MAXTC] = {
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},         // town center
+  {0, 0, 1, 1, 2, 2, 3, 3, 4, 4},         // house
+  {1, 1, 2, 2, 3, 3, 4, 4, 5, 5},         // lumber
+  {0, 0, 1, 1, 2, 2, 3, 3, 4, 4},         // gold camp
+  {0, 0, 1, 1, 2, 2, 3, 3, 4, 4},         // stone camp
+  {0, 1, 1, 2, 2, 3, 3, 4, 4, 5},         // farm
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},         // barracks
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},         // army camp
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},         // archery
+  {2, 2, 4, 4, 6, 6, 6, 8, 8, 8},         // tower
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},         // stable
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},         // siege workshop
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},         // monastery
+  {0, 0, 0, 0, 2, 2, 3, 4, 4, 5},         // keep
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},         // blacksmith
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},         // market
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},         // castle
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},         // university
+  {0, 0, 0, 0, 0, 0, 0, 1, 2, 3},         // bombard tower
+  {0, 10, 20, 30, 40, 50, 60, 70, 80, 80},// wall pieces
+  {0, 0, 1, 1, 2, 2, 3, 3, 4, 4},         // gates
+  {0, 0, 0, 4, 4, 6, 6, 8, 8, 10},        // spike traps
+  {0, 0, 0, 0, 0, 2, 2, 3, 4, 4},         // oil traps
+  {0, 0, 0, 0, 0, 0, 1, 2, 2, 3},         // scorpions
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+  {1, 1, 1, 2, 2, 3, 3, 3, 4, 4},         // mill
+};
+
 // Town Center upgrade costs (scaled down from the GDD for the prototype's faster pace)
 static const TcUp TCU[11] = {
   {}, {},
-  {mkc(400, 300), 30, "Upgrade to Level 2"},
-  {mkc(1500, 1000), 90, "Advance to Feudal Age"},
-  {mkc(1600, 1000, 400, 250), 150, "Upgrade to Level 4"},
+  {mkc(550, 400), 80, "Upgrade to Level 2"},
+  {mkc(2000, 1300), 200, "Advance to Feudal Age"},
+  {mkc(2400, 1500, 600, 350), 300, "Upgrade to Level 4"},
   {mkc(3500, 2500, 1200, 800), 300, "Advance to Castle Age"},
   {mkc(7000, 5000, 3000, 2000), 500, "Upgrade to Level 6"},
   {mkc(14000, 10000, 6000, 4000), 800, "Upgrade to Level 7"},
@@ -114,6 +144,19 @@ static const TechDef TD[T_COUNT] = {
   {"Masonry", "+12% building health per level", B_UNIVERSITY, 5, mkc(250, 0, 0, 200), 45},
   {"Siege Engineers", "+15% siege damage per level", B_UNIVERSITY, 5, mkc(300, 0, 250), 45},
   {"Chemistry", "+8% ranged and siege damage per level (gunpowder)", B_UNIVERSITY, 3, mkc(400, 0, 350, 200), 60},
+  // ---- gathering upgrades (+25% each), one per age, researched at the camp / mill itself ----
+  {"Double-Bit Axe", "+25% wood gathered", B_LUMBER, 1, mkc(200, 100), 45, 3, -1},
+  {"Bone Saw", "+25% wood gathered", B_LUMBER, 1, mkc(450, 250, 150), 75, 5, T_WOOD1},
+  {"Two-Man Saw", "+25% wood gathered", B_LUMBER, 1, mkc(1400, 800, 600), 110, 8, T_WOOD2},
+  {"Gold Mining", "+25% gold gathered", B_GOLDCAMP, 1, mkc(200, 100), 45, 3, -1},
+  {"Gold Shaft Mining", "+25% gold gathered", B_GOLDCAMP, 1, mkc(450, 250, 150), 75, 5, T_GOLD1},
+  {"Deep Shaft Mining", "+25% gold gathered", B_GOLDCAMP, 1, mkc(1400, 800, 600), 110, 8, T_GOLD2},
+  {"Stone Mining", "+25% stone gathered", B_STONECAMP, 1, mkc(200, 100), 45, 3, -1},
+  {"Stone Shaft Mining", "+25% stone gathered", B_STONECAMP, 1, mkc(450, 250, 150), 75, 5, T_STONE1},
+  {"Deep Quarrying", "+25% stone gathered", B_STONECAMP, 1, mkc(1400, 800, 600), 110, 8, T_STONE2},
+  {"Horse Collar", "+25% food from farms and hunting", B_MILL, 1, mkc(200, 100), 45, 3, -1},
+  {"Heavy Plow", "+25% food from farms and hunting", B_MILL, 1, mkc(450, 250, 150), 75, 5, T_FARM1},
+  {"Crop Rotation", "+25% food from farms and hunting", B_MILL, 1, mkc(1400, 800, 600), 110, 8, T_FARM2},
 };
 
 const BDef& bdef(int t) { return BD[t]; }
@@ -123,6 +166,7 @@ const TcUp& tcup(int l) { return TCU[clampi(l, 2, 10)]; }
 int bhp(int t, int lvl) { const BDef& d = BD[t]; lvl = clampi(lvl, 1, MAXLVL); return lvl <= 3 ? d.hp[lvl - 1] : roundi(d.hp[2] * std::pow(1.25, lvl - 3)); }
 int bdps(int t, int lvl) { const BDef& d = BD[t]; lvl = clampi(lvl, 1, MAXLVL); return lvl <= 3 ? d.dps[lvl - 1] : roundi(d.dps[2] * std::pow(1.18, lvl - 3)); }
 int bmaxn(int t, int tc) { return MAXN[t][clampi(tc, 1, MAXTC) - 1]; }
+int bmaxOut(int t, int tc) { return OUTN[t][clampi(tc, 1, MAXTC) - 1]; }
 int bslots(int t, int lvl) { const BDef& d = BD[t]; lvl = clampi(lvl, 1, MAXLVL); return lvl <= 3 ? d.slots[lvl - 1] : (d.slots[2] > 1 ? d.slots[2] + (lvl - 3) : d.slots[2]); }
 int capFor(int tc) { return CAP[clampi(tc, 1, MAXTC) - 1]; }
 int protFor(int tc) { return PROT[clampi(tc, 1, MAXTC) - 1]; }

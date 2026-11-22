@@ -12,8 +12,16 @@ struct Bld {
 };
 struct Node { int x, y; NodeType type; float amt, max, respawn; };
 enum AType { A_DEER, A_BOAR, A_WOLF };
-struct Animal { int id; int type; float x, y, hx, hy, tx, ty, wait, food, maxFood, aph; int face; bool alive; double respawn; };
-struct Explorer { int id; bool vill; float x, y, tx, ty; bool go, recall, autoX; float aph; int face; };
+struct Animal { int id; int type; float x, y, hx, hy, tx, ty, wait, food, maxFood, aph; int face; bool alive; double respawn; float hp = 0, maxHp = 0; bool chasing = false; };
+struct Explorer { int id; bool vill; float x, y, tx, ty; bool go, recall, autoX; float aph; int face; bool monk = false, carry = false; float hp = 0, maxHp = 0, hurt = 0; };   // scout (default), villager (vill) or monk (carries relics)
+struct Relic { int id; float x, y; };
+// ---- field squads: troops taken out of the army that walk around the map in real time
+struct SqUnit { int type; float hp; };
+enum SquadMode { SQ_FREE, SQ_ESCORT, SQ_GUARD, SQ_ATTACK };
+struct Squad { int id = 0; std::vector<SqUnit> u; float x = 0, y = 0, tx = 0, ty = 0; bool go = false, recall = false; int mode = SQ_FREE, target = -1; float gx = 0, gy = 0, aph = 0, fight = 0; int face = 3; };
+struct Meta { int prestige = 0, points = 0; uint32_t unlocked = 0; };    // survives restarts
+enum Stance { ST_WAR, ST_PEACE, ST_TRADE, ST_ALLY };
+enum Proposal { DP_PEACE, DP_TRADE, DP_ALLY };
 struct Chest { int x, y; Cost c; bool taken; };
 struct Lord { std::string name; int r0; double ph; };
 // ---- battle replays: the starting setup + the deploy log is enough to re-run a battle exactly (the sim is deterministic) ----
@@ -21,7 +29,7 @@ struct RDeploy { int step, type; float x, y; };
 struct RUnit { int type; bool def; float x, y; };
 struct Replay {
   int kind = 0;                        // 0 raid on a barbarian camp, 1 raid on a rival lord, 2 defence of the village, 3 defence of an outpost
-  std::string title, who; int stars = 0, pct = 0, dr = 0; bool win = false; int tcMine = 1, tcEnemy = 1, tcBuild = 1; long long when = 0; Cost loot;
+  std::string title, who; int stars = 0, pct = 0, dr = 0; bool win = false; int tcMine = 1, tcEnemy = 1, tcBuild = 1; long long when = 0; Cost loot; int lordColor = -1;
   bool defence = false; float dt = 1.f / 60.f; int reserve0 = 0, endStep = -1;
   std::vector<SimB> b; std::vector<RUnit> units; std::vector<Spawn> sq; SideMul mul[2]; std::vector<RDeploy> deploys;
 };
@@ -34,7 +42,15 @@ struct ReplayPlayer {                   // steps a replay exactly like the live 
 Replay replayCapture(const Sim& init, int kind, float dt);
 void replayPush(const Replay& r);
 void replayRun(const Replay& r, int& stars, int& pct, int maxSteps = 400000);
-struct Report { std::string who; int stars, pct; Cost stolen; int dr; bool held; int atkTc = 0, diff = 0; };
+// ---- rival lords living in the other three quadrants of the map ----
+struct Enemy { int id = 0, quad = 1, tc = 1, pers = 0; std::string name; uint32_t seed = 1; double nextLvl = 0; std::vector<int> dead;
+  int stance = ST_WAR; float trust = 0; double talkAt = 0;                      // diplomacy
+  int color = 0;                                                                  // lord colour (index into LORD_COL), kept until he is defeated
+  bool seen = false; int seenTc = 0; size_t seenDead = 0; bool visNow = false; float tacc[NRES] = {};   // last seen state of the base (fog of war memory)
+};
+struct Report { std::string who; int stars, pct; Cost stolen; int dr; bool held; int atkTc = 0, diff = 0; bool ruined = false; int lostB = 0, lostV = 0, lostU = 0; };
+
+constexpr int NPRESET = 4;                        // saved army compositions
 
 struct State {
   double t = 0; float res[NRES] = {400, 300, 100, 100}; int villagers = 3; std::vector<float> vq;
@@ -50,7 +66,11 @@ struct State {
   std::vector<float> scq; int scoutStock = 0;    // scouts being trained / waiting at home
   int patchX[3] = {-1, -1, -1}, patchY[3] = {-1, -1, -1}, patchN[3] = {0, 0, 0};   // where depleted deposits regrow
   int aid = 1;
+  std::vector<Squad> squads;
+  Meta meta; std::vector<Relic> relics; int relicsHeld = 0, betrayals = 0; double relicCheck = 0; std::vector<uint8_t> vis;   // vis: tiles you can currently see (not saved)
+  std::vector<Enemy> enemies; double enemyCheck = 0;   // rival lords on the map (quadrant 1..3; yours is 0)
   std::deque<Replay> replays;                    // newest first, at most 10
+  int presets[NPRESET][U_COUNT] = {};            // saved army compositions (unit counts)
 };
 extern State S;
 
@@ -87,6 +107,9 @@ void startUpgrade(Bld& b);
 void econTick(float dt);
 void trainVillager();
 void trainUnit(Bld& b, UType t);
+Cost presetCost(const int counts[U_COUNT]);
+int presetPop(const int counts[U_COUNT]);
+void queuePreset(int slot);              // queues every unit of a preset exactly like training them one by one (same cost, same time); toasts the outcome
 int buildCount(BType t);
 const char* canBuildErr(BType t);
 bool placeOk(BType t, int x, int y, int ignore = -1);   // `ignore` = a building id that is being moved
@@ -123,7 +146,60 @@ int rollTcDiff(Rng& r);                  // random relative level for a rival / 
 Cost villagerCost();                     // villagers get dearer the more you have
 float villagerTime();
 bool nodeVisible(const Node& n);         // gold and stone only exist from the Feudal Age
+void rebalanceNodes();
+float gatherMul(int res);                // research bonus for gathering a resource (1 + 25% per upgrade)
 void topUpNodes();                       // keeps the village stocked with trees / deposits as the Town Center grows
+// ---- quadrants, enemy lords, village size ----
+int homeG();                                           // the village grows by this many tiles on every side (2 per two Town Center levels)
+bool inHome(float x, float y);                         // inside the current village rectangle
+void revealHome();                                     // lifts the fog over the (possibly grown) village
+const char* placeBlockReason(BType t, int x, int y, int ignore = -1, bool limits = false);   // nullptr when the building may go there
+int buildCountAt(BType t, bool outside, int ignore = -1);
+Enemy* findEnemy(int id);
+void enemyOrigin(const Enemy& e, int& ox, int& oy);    // world position of the (0,0) corner of the enemy's 30x30 base
+Base enemyBase(const Enemy& e, std::vector<int>* srcIdx = nullptr);   // the buildings still standing (local 30x30 coordinates)
+bool enemyDiscovered(const Enemy& e);
+void addEnemyDefenders(Sim& sim, const Enemy& e);      // the lord's own troops (battle-map coordinates)
+void enemyDamage(int id, const std::vector<int>& deadIdx);
+void enemyWiped(int id);
+// ---- lord colours: red, green, yellow, orange, purple, grey ----
+constexpr int NLORDCOL = 6;
+extern const uint32_t LORD_COL[NLORDCOL];
+extern const char* LORD_COL_NAME[NLORDCOL];
+// ---- diplomacy, relics, visibility, prestige ----
+const char* stanceName(int s);
+float diploChance(const Enemy& e, int proposal);               // 0..1
+const char* diploBlock(const Enemy& e, int proposal);          // why this cannot even be proposed right now (nullptr = fine)
+bool diploPropose(int enemyId, int proposal, std::string& msg);
+Cost diploGiftCost(const Enemy& e);
+void diploGift(int enemyId, std::string& msg);
+void diploWar(int enemyId, bool treachery);                   // treachery = attacking while at peace / trading / allied
+int tradeRoutesAllowed();
+int tradeRoutesActive();
+Cost tradeIncome(const Enemy& e);                              // per minute for one route
+float relicGoldPerMin();
+bool sendMonk();
+bool formSquad(const int counts[U_COUNT]);                 // takes troops out of the army and puts them on the map next to the Town Center
+Squad* findSquad(int id);
+void orderSquad(int id, float x, float y);                  // walk there (free movement)
+void squadEscort(int id, int explorerId);                  // follow and protect an explorer
+void squadGuard(int id);                                    // hold this spot and fight whatever comes
+void squadAttack(int id, int enemyId);                      // march on a rival lord's base; an arrival event is raised at his gates
+void squadRecall(int id);                                   // walk home; the troops rejoin the army
+bool squadArrival(int& squadId, int& enemyId);              // true once when an attacking squad reaches its target
+void squadRemove(int id);
+int fieldPop();                                             // troops currently out on the map (they still need housing)
+float squadSpeed(const Squad& s);
+float squadHpFrac(const Squad& s);
+bool isVisible(int x, int y);
+extern bool g_visDirty;
+Base enemyBaseAt(const Enemy& e, int tc, size_t deadCount, std::vector<int>* srcIdx = nullptr);
+struct PrestigeDef { const char* name; const char* desc; int cost; };
+constexpr int NPRESTIGE = 8;
+extern const PrestigeDef PRESTIGE[NPRESTIGE];
+bool prestigeAvailable();                                      // Town Center at the maximum level
+bool prestigeHas(int i);
+bool prestigeBuy(int i);
 // ---- barbarian camps ----
 float campMul(int camp);                 // loot multiplier: 1, then 0.5, 0.25, 0.1 for repeated clears
 int campsUnlocked();
@@ -154,6 +230,7 @@ int ladderPosition();                  // 1-based position among the 300 lords
 bool seasonCheck(SeasonResult& r);     // true when a season just ended (state already rolled over)
 const std::vector<Lord>& lords();
 int lordRenown(const Lord& l);
+double shieldSeconds(int tc, int stars);   // raid shield granted after a defence
 Sim makeDefenceSim();
 Report applyDefence(const Sim& sim);
 Report headlessRaid();

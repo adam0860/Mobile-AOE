@@ -7,7 +7,9 @@
 #include <vector>
 
 constexpr int TW = 64, TH = 32, MAP = 30, MAXLVL = 10, MAXTC = 10;
-constexpr int WEXT = 15, WORLD = MAP + 2 * WEXT;   // the home area is 0..MAP; the explorable world reaches WEXT tiles further on every side
+constexpr int WEXT = 15, WHI = 105, WORLD = WHI + WEXT;   // the world is x,y in [-WEXT, WHI): four 60x60 quadrants. Your quadrant is [-15,45) with your village in 0..MAP
+constexpr int QUAD = 60;                           // quadrant size; quadrant (qx,qy) starts at (QUAD*qx - 15, QUAD*qy - 15) and its 30x30 home area at (QUAD*qx, QUAD*qy)
+constexpr int SIMN = 48, SOFF = 9;                 // every battle is fought on a SIMN x SIMN map; 30x30 bases / the village are placed SOFF tiles in from the corner
 constexpr int NCAMP = 40;                          // barbarian camps
 int campTier(int level);                           // strength tier (1..MAXTC) of a barbarian camp
 int campUnlockTc(int level);                       // Town Center level needed for camp `level`
@@ -22,7 +24,8 @@ enum BType {
 enum UType { U_MILITIA, U_MANATARMS, U_ARCHER, U_LONGSWORD, U_CROSSBOW, U_KNIGHT, U_MONK, U_RAM, U_MANGONEL,
   U_CHAMPION, U_ARBALEST, U_PALADIN, U_CANNONEER, U_TREBUCHET, U_BOMBARD, U_COUNT };
 enum NodeType { N_TREE, N_GOLD, N_STONE, N_GAME };   // N_GAME = hunted animals (Mill)
-enum TechId { T_FORGING, T_ARMOR, T_FLETCH, T_MASONRY, T_SIEGE, T_CHEMISTRY, T_COUNT };
+enum TechId { T_FORGING, T_ARMOR, T_FLETCH, T_MASONRY, T_SIEGE, T_CHEMISTRY,
+  T_WOOD1, T_WOOD2, T_WOOD3, T_GOLD1, T_GOLD2, T_GOLD3, T_STONE1, T_STONE2, T_STONE3, T_FARM1, T_FARM2, T_FARM3, T_COUNT };   // gathering upgrades: one per age (Feudal / Castle / Imperial)
 
 extern const char* RES_NAME[NRES];
 extern const uint32_t RES_COL[NRES];
@@ -51,7 +54,7 @@ struct UDef {
   bool gun = false;      // gunpowder: ignores arrow resistance
 };
 struct TcUp { Cost cost; int time; const char* label; };
-struct TechDef { const char* name; const char* desc; BType bld; int maxLvl; Cost base; int time; };
+struct TechDef { const char* name; const char* desc; BType bld; int maxLvl; Cost base; int time; int minTc = 0, prereq = -1; };
 
 const BDef& bdef(int t);
 const UDef& udef(int t);
@@ -61,6 +64,7 @@ const TcUp& tcup(int lvl);
 int bhp(int type, int lvl);
 int bdps(int type, int lvl);
 int bmaxn(int type, int tc);
+int bmaxOut(int type, int tc);          // separate limit for buildings placed outside the village (outposts)
 int bslots(int type, int lvl);
 int capFor(int tc);
 int protFor(int tc);

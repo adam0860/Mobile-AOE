@@ -6,6 +6,8 @@
 
 struct SpriteDef { int atlas, x, y, w, h; float ax, ay, scale; };
 
+void setEnemyTeamColor(uint32_t rgb);   // recolours the 'red team' unit sprites (the enemy lord's colour); takes about a second
+void setSpriteTint(uint32_t rgb);   // colour multiplier for the following drawSprite calls (0xffffff = none)
 bool loadSprites();                 // false => game falls back to the flat-shaded renderer
 bool spritesReady();
 const SpriteDef* findSprite(const std::string& name);

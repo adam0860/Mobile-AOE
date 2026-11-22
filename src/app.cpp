@@ -7,18 +7,22 @@
 #include <ctime>
 #include <functional>
 #include <unordered_map>
+#include <map>
+#include <fstream>
+#include <iterator>
 #include "game.h"
 #include "gfx.h"
 #include "sprites.h"
 #include "audio.h"
 #include "fx.h"
+#include "../third_party/stb/stb_image.h"
 
 // ============================================================ app state
 enum View { V_HOME, V_BATTLE };
-enum Modal { M_NONE, M_INTRO, M_BUILD, M_ARMY, M_LADDER, M_RAID, M_SCOUT, M_ATK_RESULT, M_DEF_RESULT, M_WELCOME, M_SEASON, M_SETTINGS, M_EXPLORE, M_OUTPOST, M_REPLAYS };
+enum Modal { M_NONE, M_INTRO, M_BUILD, M_ARMY, M_LADDER, M_RAID, M_SCOUT, M_ATK_RESULT, M_DEF_RESULT, M_WELCOME, M_SEASON, M_SETTINGS, M_EXPLORE, M_OUTPOST, M_REPLAYS, M_PRESET, M_DIPLO, M_PRESTIGE, M_SQUADS };
 enum Kind { K_BARB, K_RIVAL, K_DEFENCE };
 
-struct Scout { bool rival = false; int i = 0; Base base; std::string title; int opp = 0, tc = 1, win = 0, lose = 0, diff = 0; float lootF = 1, winF = 1; };
+struct Scout { bool rival = false; int i = 0; Base base; std::string title; int opp = 0, tc = 1, win = 0, lose = 0, diff = 0; float lootF = 1, winF = 1; int enemyId = -1; std::vector<int> srcIdx; bool sneak = false; int fromSquad = -1; };
 struct AtkResult { bool win; int stars, pct; Cost got; int dr; int surv[U_COUNT]; Kind kind; };
 
 static View view = V_HOME;
@@ -34,6 +38,13 @@ static bool incoming = false; static double incomingAt = 0;
 static bool running = true;
 
 static Scout scout;
+static int battleLordColor = -1; static int paletteApplied = -2;       // colour of the lord whose troops / base are in the current battle
+static void applyEnemyPalette(int idx) { int want = idx < 0 ? 0 : idx; if (paletteApplied == -2 ? want == 0 : paletteApplied == want) { paletteApplied = want; return; } setEnemyTeamColor(LORD_COL[want]); paletteApplied = want; }
+static uint32_t lordTintOf(int c) { return mixc(0xffffff, LORD_COL[clampi(c, 0, NLORDCOL - 1)], 0.55f); }
+static int sqSel = -1; static bool sqEscortPending = false; static int sqForm[U_COUNT]; static int savedArmy[U_COUNT]; static bool squadBattle = false;
+static int diploEnemy = -1; static std::string diploMsg; static bool armRestart = false, armAscend = false;
+static int enemySel = -1;                       // selected rival lord (tap one of their buildings)
+static std::string bmWhy;                        // why the building cannot go where the ghost is
 static int explSel = -1;                       // selected explorer (tap the map to send it)
 static OutpostReport outRep; static int demoArm = -1; static int bmMoveId = -1;      // bmMoveId >= 0: the building being moved
 static const int DEP = 7;                        // troops may be deployed this many tiles beyond the map edge
@@ -42,9 +53,10 @@ void sfx(int id) { audioPlay((Sfx)id); }
 static struct { Sim sim; Kind kind = K_BARB; UType sel = U_MILITIA; bool done = false; } B;
 static AtkResult atk; static Report defRep; static bool hasDef = false;
 // ---- replays: recording of the live battle and the viewer
+static int usedCount[U_COUNT]; static int presetEdit = 0;   // troops deployed in the current raid (they never come back); preset being edited
 static ReplayPlayer RP; static Replay repCur, rec;
 static bool replaying = false, recording = false, rpPaused = false; static float rpSpeed = 1, battleAcc = 0; static int bSteps = 0;
-static void deployRec(UType t, float x, float y, bool def = false) { if (recording && !def) rec.deploys.push_back({bSteps, (int)t, x, y}); B.sim.deploy(t, x, y, def); }
+static void deployRec(UType t, float x, float y, bool def = false) { if (recording && !def) rec.deploys.push_back({bSteps, (int)t, x, y}); if (!def) usedCount[t]++; B.sim.deploy(t, x, y, def); }
 static struct { double away = 0; Cost gain; Report rep; bool raided = false, outpost = false; } welcome;
 
 static struct { float x = 0, y = 0, zoom = 1, vx = 0, vy = 0, zt = 1, zax = 0, zay = 0; } cam;
@@ -61,9 +73,9 @@ void banner(const std::string& m) { bannerMsg = m; bannerT = 3.0f; }
 
 static float U(float v) { return v * G.u; }
 // ---- view rotation: the world is rotated about the village centre in 90-degree steps (animated) before the isometric projection
-static float vAng = 0, vTarget = 0, vcs = 1, vsn = 0;
-static Pt rotG(float gx, float gy) { float dx = gx - 15, dy = gy - 15; return {15 + dx * vcs - dy * vsn, 15 + dx * vsn + dy * vcs}; }
-static Pt unrotG(float vx, float vy) { float dx = vx - 15, dy = vy - 15; return {15 + dx * vcs + dy * vsn, 15 - dx * vsn + dy * vcs}; }
+static float vAng = 0, vTarget = 0, vcs = 1, vsn = 0, rotPivot = 15;                // pivot = the village centre at home, the middle of the battle map in battle
+static Pt rotG(float gx, float gy) { float dx = gx - rotPivot, dy = gy - rotPivot; return {rotPivot + dx * vcs - dy * vsn, rotPivot + dx * vsn + dy * vcs}; }
+static Pt unrotG(float vx, float vy) { float dx = vx - rotPivot, dy = vy - rotPivot; return {rotPivot + dx * vcs + dy * vsn, rotPivot - dx * vsn + dy * vcs}; }
 static Pt iso(float gx, float gy) { Pt v = rotG(gx, gy); return {(v.x - v.y) * TW / 2 * cam.zoom + cam.x, (v.x + v.y) * TH / 2 * cam.zoom + cam.y}; }
 static Pt toGrid(float sx, float sy) {
   float wx = (sx - cam.x) / cam.zoom, wy = (sy - cam.y) / cam.zoom;
@@ -76,14 +88,14 @@ static void setViewAngle(float a) {                                             
 }
 static float frand();
 static float camLimitLo() { return view == V_HOME ? -WEXT + 1.f : -(float)DEP - 2.f; }
-static float camLimitHi() { return view == V_HOME ? MAP + WEXT - 1.f : MAP + (float)DEP + 2.f; }
+static float camLimitHi() { return view == V_HOME ? WHI - 1.f : SIMN + (float)DEP + 2.f; }
 static void centerCamera() {
   vAng = vTarget = 0; vcs = 1; vsn = 0;
-  bool battle = view == V_BATTLE;
-  float span = battle ? MAP + 2.f * DEP : MAP;
+  bool battle = view == V_BATTLE; rotPivot = battle ? SIMN / 2.f : 15.f;
+  float span = battle ? SIMN + 2.f * DEP : MAP;
   float fit = battle ? std::min(G.W / (span * TW * 1.04f), G.H * 0.86f / (span * TH)) : std::min(G.W / (span * TW * 0.8f), G.H / (span * TH * 1.15f));
   cam.zoom = clampf(fit * (battle ? 1.0f : 1.7f), 0.25f, 3.f); cam.zt = cam.zoom; cam.vx = cam.vy = 0;
-  Pt c = {(15.f - 15.f) * TW / 2.f, (15.f + 15.f) * TH / 2.f};    // world px of grid (15,15)
+  Pt c = {0.f, rotPivot * TH};    // world px of the pivot point
   cam.x = G.W / 2.f - c.x * cam.zoom; cam.y = G.H / 2.f - c.y * cam.zoom + U(8);
 }
 static void zoomAt(float x, float y, float z) {
@@ -355,8 +367,8 @@ static const SpriteDef* buildingSprite(BType t, int lvl, int age) {
   }
 }
 static bool wallGrid[WORLD * WORLD];
-static bool wallAt(int x, int y) { return x >= -WEXT && y >= -WEXT && x < MAP + WEXT && y < MAP + WEXT && wallGrid[(y + WEXT) * WORLD + (x + WEXT)]; }
-static void wallSet(int x, int y) { if (x >= -WEXT && y >= -WEXT && x < MAP + WEXT && y < MAP + WEXT) wallGrid[(y + WEXT) * WORLD + (x + WEXT)] = true; }
+static bool wallAt(int x, int y) { return x >= -WEXT && y >= -WEXT && x < WHI && y < WHI && wallGrid[(y + WEXT) * WORLD + (x + WEXT)]; }
+static void wallSet(int x, int y) { if (x >= -WEXT && y >= -WEXT && x < WHI && y < WHI) wallGrid[(y + WEXT) * WORLD + (x + WEXT)] = true; }
 static const SpriteDef* pieceSprite(BType t, int lvl, int x, int y) {
   auto nb = [&](int ux, int uy) { return wallAt(x + (int)std::lround(ux * vcs + uy * vsn), y + (int)std::lround(-ux * vsn + uy * vcs)); };   // neighbours in view directions
   int mask = (nb(1, 0) ? 1 : 0) | (nb(-1, 0) ? 2 : 0) | (nb(0, 1) ? 4 : 0) | (nb(0, -1) ? 8 : 0);
@@ -389,6 +401,7 @@ static void drawBuilding(const BView& b, int age) {
       std::string lv = std::to_string(b.lvl); float w = G.textSize(lv, F_S).x + U(14);
       G.rrect(top.x - w / 2, top.y - U(8), w, U(16), U(8), 0x0b0704, 0.7f); G.rrect(top.x - w / 2 + U(1), top.y - U(7), w - U(2), U(14), U(7), 0x7a5a24, 0.9f);
       G.text(lv, top.x, top.y - U(6.5f), F_S, 0xfff0c0, A_CENTER);
+      if (bdef(b.type).res >= 0 && b.slots > 0) { float ix = top.x - w / 2 - U(13); G.circle(ix, top.y, U(12), 0x0b0704, 0.8f); resIcon(bdef(b.type).res, ix, top.y, U(20)); }      // which resource this camp produces
       if (b.slots > 0) {                                           // workers on this building: assigned / capacity (red when nobody works here)
         std::string wk = std::to_string(b.workers) + "/" + std::to_string(b.slots); float ww = G.textSize(wk, F_S).x + U(26), wx = top.x + w / 2 + U(4);
         uint32_t col = b.workers == 0 ? 0xff9a8a : b.workers >= b.slots ? 0x9af0a0 : 0xfff0c0;
@@ -422,12 +435,14 @@ static void drawGround(int tc, bool grid) {
   bool any = false;
   if (spritesReady()) {
     float hw = MAP * TW / 2.f * cam.zoom * 1.5f, hh = MAP * TH / 2.f * cam.zoom * 1.5f;
-    std::vector<std::pair<float, int>> order; for (int oi = -1; oi <= 1; oi++) for (int oj = -1; oj <= 1; oj++) order.push_back({dep(MAP / 2.f + oi * MAP, MAP / 2.f + oj * MAP), (oi + 1) * 3 + (oj + 1)});
+    int k0 = -1, k1 = view == V_HOME ? 3 : 2, nk = k1 - k0 + 1;
+    std::vector<std::pair<float, int>> order; for (int oi = k0; oi <= k1; oi++) for (int oj = k0; oj <= k1; oj++) order.push_back({dep(MAP / 2.f + oi * MAP, MAP / 2.f + oj * MAP), (oi - k0) * nk + (oj - k0)});
     std::sort(order.begin(), order.end());      // far copies first so a nearer copy hides the earth skirt of the one behind it
-    for (auto& od : order) { int oi = od.second / 3 - 1, oj = od.second % 3 - 1;
+    for (auto& od : order) { int oi = od.second / nk + k0, oj = od.second % nk + k0;
       Pt c = iso(MAP / 2.f + oi * MAP, MAP / 2.f + oj * MAP);
       if (c.x + hw < 0 || c.x - hw > G.W || c.y + hh < 0 || c.y - hh > G.H) continue;
-      for (int i = 0; i < 2; i++) for (int j = 0; j < 2; j++) { char nm[24]; std::snprintf(nm, sizeof nm, "ground_%d_%d", i, j); if (const SpriteDef* gs = findSprite(nm)) { drawSprite(*gs, c.x, c.y, cam.zoom); any = true; } }
+      if (view == V_HOME) { bool seen = false; for (int y = oj * MAP; y < oj * MAP + MAP && !seen; y += 2) for (int x = oi * MAP; x < oi * MAP + MAP; x += 2) if (isExplored(x, y) || isExplored(x + 1, y + 1)) { seen = true; break; } if (!seen) continue; }       // nothing explored here: the fog hides it anyway
+      for (int i = 0; i < 2; i++) for (int j = 0; j < 2; j++) { char nm[24]; std::snprintf(nm, sizeof nm, "ground_%d_%d", i, j); if (const SpriteDef* gs = findSprite(nm)) { drawSprite(*gs, c.x, c.y, cam.zoom, 1.f); any = true; } }
     }
   }
   if (!any) {
@@ -436,32 +451,40 @@ static void drawGround(int tc, bool grid) {
   }
   if (grid) {
     G.setColor(0xffffff, 0.12f);
-    for (int i = -WEXT; i <= MAP + WEXT; i++) { Pt a = iso((float)i, -WEXT), b = iso((float)i, MAP + WEXT), c = iso(-WEXT, (float)i), d = iso(MAP + WEXT, (float)i); SDL_RenderDrawLineF(G.r, a.x, a.y, b.x, b.y); SDL_RenderDrawLineF(G.r, c.x, c.y, d.x, d.y); }
+    for (int i = -WEXT; i <= WHI; i++) { Pt a = iso((float)i, -WEXT), b = iso((float)i, WHI), c = iso(-WEXT, (float)i), d = iso(WHI, (float)i); SDL_RenderDrawLineF(G.r, a.x, a.y, b.x, b.y); SDL_RenderDrawLineF(G.r, c.x, c.y, d.x, d.y); }
   }
   (void)tc;
 }
 // ---- fog of war: one soft-edged texture (3 px per tile) over the whole explorable world
-static const int FOGMIN = -30, FOGN = 90, FOGPX = 3, FOGW = FOGN * FOGPX;
+static const int FOGMIN = -30, FOGN = 165, FOGPX = 3, FOGW = FOGN * FOGPX;
 static SDL_Texture* fogTex = nullptr;
 static void refreshFog() {
   if (!fogTex) { fogTex = SDL_CreateTexture(G.r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, FOGW, FOGW); if (!fogTex) return; SDL_SetTextureBlendMode(fogTex, SDL_BLENDMODE_BLEND); SDL_SetTextureScaleMode(fogTex, SDL_ScaleModeLinear); g_fogDirty = true; }
-  if (!g_fogDirty) return;
+  static float lastUpd = -1; float nowT = SDL_GetTicks() / 1000.f;
+  if (!g_fogDirty && !g_visDirty) return;
+  if (!g_fogDirty && nowT - lastUpd < 0.1f) return;                       // moving units only change the view a few times a second
+  lastUpd = nowT;
   static std::vector<uint32_t> px; px.assign((size_t)FOGW * FOGW, 0);
-  static std::vector<float> bl; bl.assign((size_t)FOGN * FOGN, 0.f);
-  { static const float K[5] = {0.06f, 0.24f, 0.4f, 0.24f, 0.06f}; static std::vector<float> tmp; tmp.assign((size_t)FOGN * FOGN, 0.f);
-    for (int y = 0; y < FOGN; y++) for (int x = 0; x < FOGN; x++) { float v = 0; for (int k = -2; k <= 2; k++) v += K[k + 2] * (isExplored(x + k + FOGMIN, y + FOGMIN) ? 1.f : 0.f); tmp[(size_t)y * FOGN + x] = v; }
-    for (int y = 0; y < FOGN; y++) for (int x = 0; x < FOGN; x++) { float v = 0; for (int k = -2; k <= 2; k++) { int yy = std::max(0, std::min(FOGN - 1, y + k)); v += K[k + 2] * tmp[(size_t)yy * FOGN + x]; } bl[(size_t)y * FOGN + x] = v; } }
-  auto tv = [&](int tx, int ty) { return (tx < 0 || ty < 0 || tx >= FOGN || ty >= FOGN) ? 0.f : bl[(size_t)ty * FOGN + tx]; };
+  static std::vector<float> bl, bv, tmp;
+  auto blur = [&](std::vector<float>& out, bool visible) {
+    static const float K[5] = {0.06f, 0.24f, 0.4f, 0.24f, 0.06f}; out.assign((size_t)FOGN * FOGN, 0.f); tmp.assign((size_t)FOGN * FOGN, 0.f);
+    for (int y = 0; y < FOGN; y++) for (int x = 0; x < FOGN; x++) { float v = 0; for (int k = -2; k <= 2; k++) v += K[k + 2] * ((visible ? isVisible(x + k + FOGMIN, y + FOGMIN) : isExplored(x + k + FOGMIN, y + FOGMIN)) ? 1.f : 0.f); tmp[(size_t)y * FOGN + x] = v; }
+    for (int y = 0; y < FOGN; y++) for (int x = 0; x < FOGN; x++) { float v = 0; for (int k = -2; k <= 2; k++) { int yy = std::max(0, std::min(FOGN - 1, y + k)); v += K[k + 2] * tmp[(size_t)yy * FOGN + x]; } out[(size_t)y * FOGN + x] = v; }
+  };
+  blur(bl, false); blur(bv, true);
+  auto tv = [&](const std::vector<float>& f, int tx, int ty) { return (tx < 0 || ty < 0 || tx >= FOGN || ty >= FOGN) ? 0.f : f[(size_t)ty * FOGN + tx]; };
   for (int y = 0; y < FOGW; y++) {
     float fy = (y + 0.5f) / FOGPX - 0.5f; int y0 = (int)std::floor(fy); float wy = fy - y0;
     for (int x = 0; x < FOGW; x++) {
       float fx = (x + 0.5f) / FOGPX - 0.5f; int x0 = (int)std::floor(fx); float wx = fx - x0;
-      float v = (tv(x0, y0) * (1 - wx) + tv(x0 + 1, y0) * wx) * (1 - wy) + (tv(x0, y0 + 1) * (1 - wx) + tv(x0 + 1, y0 + 1) * wx) * wy;
-      float t = clampf((v - 0.2f) / 0.6f, 0, 1); t = t * t * (3 - 2 * t);
-      uint32_t a = (uint32_t)((1.f - t) * 0.97f * 255); px[(size_t)y * FOGW + x] = (a << 24) | (0x0b << 16) | (0x12 << 8) | 0x1a;
+      float ve = (tv(bl, x0, y0) * (1 - wx) + tv(bl, x0 + 1, y0) * wx) * (1 - wy) + (tv(bl, x0, y0 + 1) * (1 - wx) + tv(bl, x0 + 1, y0 + 1) * wx) * wy;
+      float vv = (tv(bv, x0, y0) * (1 - wx) + tv(bv, x0 + 1, y0) * wx) * (1 - wy) + (tv(bv, x0, y0 + 1) * (1 - wx) + tv(bv, x0 + 1, y0 + 1) * wx) * wy;
+      float te = clampf((ve - 0.2f) / 0.6f, 0, 1); te = te * te * (3 - 2 * te); float tvv = clampf((vv - 0.2f) / 0.6f, 0, 1); tvv = tvv * tvv * (3 - 2 * tvv);
+      float al = (1.f - te) * 0.97f + te * (1.f - tvv) * 0.42f;                                  // unexplored: black; explored but out of sight: dimmed; in sight: clear
+      uint32_t a = (uint32_t)(clampf(al, 0, 1) * 255); px[(size_t)y * FOGW + x] = (a << 24) | (0x0b << 16) | (0x12 << 8) | 0x1a;
     }
   }
-  SDL_UpdateTexture(fogTex, nullptr, px.data(), FOGW * 4); g_fogDirty = false;
+  SDL_UpdateTexture(fogTex, nullptr, px.data(), FOGW * 4); g_fogDirty = false; g_visDirty = false;
 }
 static void drawFogQuad(Pt p0, Pt p1, Pt p2, Pt p3, float u0, float u1) {
   if (!fogTex) return;
@@ -519,9 +542,27 @@ static void drawHome() {
   for (auto& n : S.nodes) if (n.amt > 0 && nodeVisible(n) && isExplored(n.x, n.y) && onScreen(n.x + .5f, n.y + .5f, 120 * cam.zoom + 40)) { Node* np = &n; items.push_back({dep(n.x + .5f, n.y + .5f), [np] { drawNode(*np); }}); }
   std::fill(wallGrid, wallGrid + WORLD * WORLD, false);
   for (auto& b : S.b) if (b.type == B_WALL || b.type == B_GATE) wallSet(b.x, b.y);
+  {   // rival lords' bases in the other quadrants (tinted red, only where you have explored)
+    struct EC { int tc = -1; size_t dead = 0; std::vector<SimB> b; }; static std::unordered_map<int, EC> ecache;
+    for (auto& e : S.enemies) {
+      if (!e.seen) continue;
+      EC& ec = ecache[e.id]; if (ec.tc != e.seenTc || ec.dead != e.seenDead || ec.b.empty()) { ec.tc = e.seenTc; ec.dead = e.seenDead; ec.b = enemyBaseAt(e, e.seenTc, e.seenDead).buildings; }
+      int ox, oy; enemyOrigin(e, ox, oy);
+      for (auto& sb : ec.b) if (sb.wall) wallSet((int)sb.x + ox, (int)sb.y + oy);
+      int eage = clampi(ageOf(e.seenTc), 0, 3); std::string label = e.name + "  TC" + std::to_string(e.seenTc) + (e.visNow ? "" : "  (last seen)"); uint32_t lcol = LORD_COL[clampi(e.color, 0, NLORDCOL - 1)]; uint32_t tint = e.visNow ? lordTintOf(e.color) : mixc(lordTintOf(e.color), 0x808080, 0.5f);
+      for (auto& sb : ec.b) {
+        if (sb.trap || !isExplored((int)sb.x + ox, (int)sb.y + oy) || !onScreen(sb.x + ox + sb.w / 2.f, sb.y + oy + sb.h / 2.f, 160 * cam.zoom + 60)) continue;
+        BView v{sb.type, sb.lvl, sb.x + ox, sb.y + oy, sb.w, sb.h, 1, false, false, 0, e.id == enemySel && sb.hq, 0}; bool hq = sb.hq;
+        items.push_back({dep(v.x + v.w / 2.f, v.y + v.h / 2.f), [v, eage, hq, label, tint, lcol] {
+          setSpriteTint(tint); drawBuilding(v, eage); setSpriteTint(0xffffff);
+          if (hq) { Pt c = iso(v.x + v.w / 2.f, v.y + v.h / 2.f); const SpriteDef* sp = buildingSprite(v.type, v.lvl, eage); float ty = c.y - (sp ? sp->ay / sp->scale * cam.zoom : 40.f) - U(34); float lw = G.textSize(label, F_S).x; G.circle(c.x - lw / 2 - U(9), ty + U(8), U(5.5f), lcol); G.circle(c.x - lw / 2 - U(9), ty + U(8), U(3.2f), shadec(lcol, 0.35f)); G.textShadow(label, c.x, ty, F_S, mixc(lcol, 0xffffff, 0.35f), A_CENTER); }
+        }});
+      }
+    }
+  }
   {   // wildlife, treasure and explorers
     static const char* AN[3] = {"deer", "boar", "wolf"};
-    for (auto& a : S.animals) if (a.alive && isExplored((int)std::floor(a.x), (int)std::floor(a.y)) && onScreen(a.x, a.y, 100 * cam.zoom + 40)) {
+    for (auto& a : S.animals) if (a.alive && isVisible((int)std::floor(a.x), (int)std::floor(a.y)) && onScreen(a.x, a.y, 100 * cam.zoom + 40)) {
       const Animal* ap = &a;
       items.push_back({dep(a.x, a.y), [ap] {
         static const int GM[4] = {0, 6, 4, 2}; int mv = ((GM[ap->face & 3] - (int)std::lround(vAng / 0.785398f)) % 8 + 8) % 8; int sk = ((mv % 2 ? 8 - mv + 1 : 8 - mv) / 2) % 4;
@@ -529,16 +570,33 @@ static void drawHome() {
         if (const SpriteDef* sp = findSprite(nm)) { Pt p = iso(ap->x, ap->y); bool mv = std::fabs(ap->tx - ap->x) + std::fabs(ap->ty - ap->y) > 0.08f; float bob = mv ? std::fabs(std::sin(ap->aph * 3.f)) * 3.f * cam.zoom : 0.f; drawSpriteShadow(*sp, p.x, p.y, cam.zoom, 0.28f); drawSprite(*sp, p.x, p.y - bob, cam.zoom); }
       }});
     }
+    for (auto& rl : S.relics) if (isExplored((int)std::floor(rl.x), (int)std::floor(rl.y)) && onScreen(rl.x, rl.y, 100 * cam.zoom + 40)) {
+      const Relic* rp = &rl;
+      items.push_back({dep(rl.x, rl.y), [rp] { if (const SpriteDef* sp = findSprite("relic_0")) { Pt p = iso(rp->x, rp->y); drawSpriteShadow(*sp, p.x, p.y, cam.zoom, 0.28f); drawSprite(*sp, p.x, p.y, cam.zoom); drawSpriteGlow(*sp, p.x, p.y, cam.zoom, 0.12f + 0.1f * std::sin(nowSec() * 2.5f + rp->x)); } }});
+    }
     for (auto& c : S.chests) if (!c.taken && isExplored(c.x, c.y) && onScreen(c.x + .5f, c.y + .5f, 80 * cam.zoom + 40)) {
       const Chest* cp = &c;
       items.push_back({dep(c.x + .5f, c.y + .5f), [cp] { if (const SpriteDef* sp = findSprite("chest_0")) { Pt p = iso(cp->x + .5f, cp->y + .5f); drawSpriteShadow(*sp, p.x, p.y, cam.zoom, 0.25f); drawSprite(*sp, p.x, p.y, cam.zoom); float tw = 0.5f + 0.5f * std::sin(nowSec() * 4.f + cp->x); G.circle(p.x + 6 * cam.zoom, p.y - 14 * cam.zoom, (2.5f + 1.5f * tw) * cam.zoom, 0xfff2a0, 0.4f + 0.5f * tw); } }});
+    }
+    for (auto& q : S.squads) {
+      if (!onScreen(q.x, q.y, 140 * cam.zoom + 60)) continue; const Squad* qp = &q;
+      items.push_back({dep(q.x, q.y), [qp] {
+        int n = (int)qp->u.size(); if (n == 0) return; int show = std::min(6, n); int dirv = ((qp->face - (int)std::lround(vAng / 0.785398f)) % 8 + 8) % 8;
+        if (qp->id == sqSel) { float pulse = 0.6f + 0.4f * std::sin(nowSec() * 6.f); polyLine({iso(qp->x - 1.1f, qp->y - 1.1f), iso(qp->x + 1.1f, qp->y - 1.1f), iso(qp->x + 1.1f, qp->y + 1.1f), iso(qp->x - 1.1f, qp->y + 1.1f)}, 0xffe27a, pulse); }
+        std::vector<std::pair<float, int>> ord; for (int k = 0; k < show; k++) { float ox = ((k % 3) - 1) * 0.55f, oy = ((k / 3) - 0.5f) * 0.65f; ord.push_back({dep(qp->x + ox, qp->y + oy), k}); } std::sort(ord.begin(), ord.end());
+        for (auto& od : ord) { int k = od.second; float ox = ((k % 3) - 1) * 0.55f, oy = ((k / 3) - 0.5f) * 0.65f; int idx = k * n / show; int ty = qp->u[idx].type;
+          int fr = qp->fight > 0 ? 7 + (int)(nowSec() * 6.f + k) % 3 : qp->go ? 1 + (int)((qp->aph + k * 0.17f - std::floor(qp->aph + k * 0.17f)) * 6) % 6 : 0;
+          drawUnitSpr(qp->x + ox, qp->y + oy, ty, false, dirv, fr); }
+        Pt p = iso(qp->x, qp->y); bar(p.x, p.y - 74 * cam.zoom, U(34), squadHpFrac(*qp), 0x6fe06f); G.textShadow("x" + std::to_string(n), p.x, p.y - 74 * cam.zoom - U(18), F_S, 0xe8f0ff, A_CENTER);
+      }});
     }
     for (auto& e : S.expl) {
       const Explorer* ep = &e;
       items.push_back({dep(e.x, e.y), [ep] {
         float ph = ep->aph - std::floor(ep->aph); int fr = ep->go ? 1 + (int)(ph * 6) % 6 : 0;
         if (ep->id == explSel) { float pulse = 0.6f + 0.4f * std::sin(nowSec() * 6.f); polyLine({iso(ep->x - .6f, ep->y - .6f), iso(ep->x + .6f, ep->y - .6f), iso(ep->x + .6f, ep->y + .6f), iso(ep->x - .6f, ep->y + .6f)}, 0xffe27a, pulse); }
-        drawUnitSpr(ep->x, ep->y, ep->vill ? -1 : 100, false, ((ep->face - (int)std::lround(vAng / 0.785398f)) % 8 + 8) % 8, fr);
+        drawUnitSpr(ep->x, ep->y, ep->vill ? -1 : ep->monk ? (int)U_MONK : 100, false, ((ep->face - (int)std::lround(vAng / 0.785398f)) % 8 + 8) % 8, fr);
+        if (ep->carry) if (const SpriteDef* rs = findSprite("relic_0")) { Pt p = iso(ep->x, ep->y); drawSprite(*rs, p.x, p.y - 46 * cam.zoom, cam.zoom, 1.f, 0.55f); }
       }});
     }
   }
@@ -623,7 +681,8 @@ static void drawBattle() {
       }}); continue;
     }
     BView v{b.type, b.lvl, b.x, b.y, b.w, b.h, b.hp / b.maxhp, true, false, 0, false, 0};
-    items.push_back({dep(b.x + b.w / 2.f, b.y + b.h / 2.f), [v, age] { drawBuilding(v, age); }});
+    uint32_t bt = (B.kind == K_RIVAL && battleLordColor >= 0) ? lordTintOf(battleLordColor) : 0xffffff;
+    items.push_back({dep(b.x + b.w / 2.f, b.y + b.h / 2.f), [v, age, bt] { setSpriteTint(bt); drawBuilding(v, age); setSpriteTint(0xffffff); }});
   }
   for (auto& c : sim.corpses) {
     const Corpse* cp = &c;
@@ -646,7 +705,7 @@ static void drawBattle() {
   for (auto& p : sim.proj) drawProj(p);
   drawParticles();
   if (B.kind != K_DEFENCE && !sim.started && !replaying) {                       // deployment edge, pulsing
-    float pulse = 0.25f + 0.2f * std::sin(nowSec() * 3.f); float D = (float)DEP, M = (float)MAP;
+    float pulse = 0.25f + 0.2f * std::sin(nowSec() * 3.f); float D = (float)DEP, M = (float)SIMN;
     polyFill({iso(-D, -D), iso(M + D, -D), iso(M + D, 0), iso(-D, 0)}, 0xffe678, 0.15f + 0.08f * pulse); polyFill({iso(-D, M), iso(M + D, M), iso(M + D, M + D), iso(-D, M + D)}, 0xffe678, 0.15f + 0.08f * pulse);
     polyFill({iso(-D, 0), iso(0, 0), iso(0, M), iso(-D, M)}, 0xffe678, 0.15f + 0.08f * pulse); polyFill({iso(M, 0), iso(M + D, 0), iso(M + D, M), iso(M, M)}, 0xffe678, 0.15f + 0.08f * pulse);
     polyLine({iso(-D, -D), iso(M + D, -D), iso(M + D, M + D), iso(-D, M + D)}, 0xffe678, pulse + 0.3f);
@@ -654,17 +713,33 @@ static void drawBattle() {
 }
 
 // ============================================================ raid flow
+static void restartGame(bool ascend) {
+  Meta m = S.meta; if (ascend) { m.prestige++; m.points++; }
+  newGame(); S.meta = m; S.seenIntro = false;
+  replaying = false; recording = false; view = V_HOME; modal = M_NONE; selId = -1; explSel = -1; enemySel = -1; buildMode = false; incoming = false; hasDef = false; dispInit = false; armRestart = armAscend = false; diploEnemy = -1; diploMsg.clear();
+  outRep = OutpostReport(); fxClear(); centerCamera(); g_fogDirty = true; g_visDirty = true; saveGame(); modal = M_INTRO; modalScroll = 0;
+  banner(ascend ? "You have ascended - prestige " + std::to_string(S.meta.prestige) : "A new realm begins");
+}
 static void goHome() {
   modal = M_NONE; view = V_HOME; centerCamera(); saveGame(); incoming = false;
 }
 static void beginBattle() {
-  modal = M_NONE; B.sim = Sim(); B.sim.b = scout.base.buildings; B.sim.reserve = [] { return armyCount() - S.army[U_MONK]; };
+  modal = M_NONE; squadBattle = false;
+  if (scout.fromSquad >= 0) {                                              // the squad at the gates fights: it becomes the army for this battle
+    if (Squad* sq = findSquad(scout.fromSquad)) { for (int i = 0; i < U_COUNT; i++) { savedArmy[i] = S.army[i]; S.army[i] = 0; } for (auto& u : sq->u) S.army[u.type]++; squadBattle = true; squadRemove(scout.fromSquad); sqSel = -1; }
+    scout.fromSquad = -1;
+  }
+  B.sim = Sim(); B.sim.b = scout.base.buildings; for (auto& sb : B.sim.b) { sb.x += SOFF; sb.y += SOFF; } B.sim.reserve = [] { return armyCount() - S.army[U_MONK]; };
   B.sim.mul[0] = techMul(); B.sim.mul[1] = enemyMul(scout.tc);
   B.kind = scout.rival ? K_RIVAL : K_BARB; B.done = false; B.sel = U_MILITIA;
   for (int i = 0; i < U_COUNT; i++) if (S.army[i] > 0) { B.sel = (UType)i; break; }
+  battleLordColor = -1;
+  if (scout.enemyId >= 0) { if (scout.sneak) diploWar(scout.enemyId, true); if (Enemy* en = findEnemy(scout.enemyId)) { addEnemyDefenders(B.sim, *en); battleLordColor = en->color; } }
+  applyEnemyPalette(battleLordColor);
   B.sim.spawnGarrisons();
+  for (int i = 0; i < U_COUNT; i++) usedCount[i] = 0;
   replaying = false; recording = true; bSteps = 0; battleAcc = 0;
-  rec = replayCapture(B.sim, scout.rival ? 1 : 0, 1.f / 60.f); rec.reserve0 = armyCount() - S.army[U_MONK]; rec.title = scout.title; rec.who = scout.title; rec.tcMine = tcLvl(); rec.tcEnemy = scout.tc; rec.tcBuild = scout.tc;
+  rec = replayCapture(B.sim, scout.rival ? 1 : 0, 1.f / 60.f); rec.lordColor = battleLordColor; rec.reserve0 = armyCount() - S.army[U_MONK]; rec.title = scout.title; rec.who = scout.title; rec.tcMine = tcLvl(); rec.tcEnemy = scout.tc; rec.tcBuild = scout.tc;
   view = V_BATTLE; selId = -1; buildMode = false; centerCamera();
 }
 static void startBarb(int i) {
@@ -681,10 +756,16 @@ static void findRival(bool first) {
   scout.title = L[li].name; scout.opp = lordRenown(L[li]); scout.tc = tc; scout.diff = diff; scout.lootF = lootFactor(diff); scout.winF = winFactor(diff);
   double E = expectedScore(S.renown, scout.opp); scout.win = std::max(1, roundi(40 * (1 - E) * winFactor(diff))); scout.lose = std::max(1, roundi(40 * E * loseFactor(diff))); modal = M_SCOUT;
 }
+static void startEnemy(int id) {
+  Enemy* e = findEnemy(id); if (!e) return;
+  scout = Scout(); scout.rival = true; scout.enemyId = id; scout.base = enemyBase(*e, &scout.srcIdx); scout.title = e->name + "'s stronghold"; scout.tc = e->tc; scout.opp = S.renown;
+  int diff = e->tc - tcLvl(); scout.diff = diff; scout.lootF = lootFactor(diff); scout.winF = winFactor(diff);
+  scout.win = std::max(1, roundi(20 * winFactor(diff))); scout.lose = std::max(1, roundi(20 * loseFactor(diff))); scout.sneak = e->stance >= ST_PEACE; enemySel = -1; modal = M_SCOUT;
+}
 static void finishAttack() {
   B.done = true; Sim& sim = B.sim; int stars = sim.stars(), pct = sim.pct();
   AtkResult r{}; r.kind = B.kind; r.stars = stars; r.pct = pct;
-  for (auto& u : sim.units) if (!u.def) { S.army[u.type]++; r.surv[u.type]++; }
+  for (int i = 0; i < U_COUNT; i++) r.surv[i] = usedCount[i];                          // deployed troops are spent: they do not return
   for (int k = 0; k < NRES; k++) {
     float full = scout.base.loot.v[k] * (scout.rival ? 0.2f * scout.lootF : campMul(scout.i)); int v = (int)std::floor(full * pct / 100.f);
     int got = std::max(0, std::min(v, (int)(cap() - S.res[k]))); S.res[k] += got; r.got.v[k] = got;
@@ -693,13 +774,19 @@ static void finishAttack() {
   r.dr = scout.rival ? (r.win ? scout.win + roundi(sb[stars] * scout.winF) : -scout.lose) : (r.win ? scout.win : 0);
   int before = S.renown; S.renown = std::max(0, S.renown + r.dr); r.dr = S.renown - before;
   if (!scout.rival && r.win) { S.camp[scout.i] = S.t + 180; S.campWins[scout.i] = std::min(99, S.campWins[scout.i] + 1); }
+  if (scout.enemyId >= 0) {                                                  // a rival lord: destroyed buildings stay destroyed; wiping everything out removes them from the map
+    std::vector<int> deadIdx; for (size_t i = 0; i < sim.b.size() && i < scout.srcIdx.size(); i++) if (sim.b[i].dead) deadIdx.push_back(scout.srcIdx[i]);
+    if (pct >= 100) { for (int k = 0; k < NRES; k++) { int bonus = (int)(scout.base.loot.v[k] * 0.3f); int add = std::max(0, std::min(bonus, (int)(cap() - S.res[k]))); S.res[k] += add; r.got.v[k] += add; } enemyWiped(scout.enemyId); banner("Rival lord defeated - their land is free again!"); }
+    else enemyDamage(scout.enemyId, deadIdx);
+  }
+  if (squadBattle) { for (int i = 0; i < U_COUNT; i++) S.army[i] += savedArmy[i]; squadBattle = false; }      // troops that stayed in reserve go home with the rest of the army
   if (recording) { rec.title = scout.title; rec.stars = stars; rec.pct = pct; rec.dr = r.dr; rec.win = r.win; rec.loot = r.got; replayPush(rec); recording = false; }
   atk = r; modal = M_ATK_RESULT; audioPlay(r.win ? SFX_VICTORY : SFX_DEFEAT);
 }
 static void startDefence() {
   incoming = false; modal = M_NONE; selId = -1; buildMode = false;
   B.sim = makeDefenceSim(); B.kind = K_DEFENCE; B.done = false; view = V_BATTLE;
-  replaying = false; recording = true; bSteps = 0; battleAcc = 0; rec = replayCapture(B.sim, 2, 1.f / 60.f); rec.tcMine = tcLvl(); rec.tcEnemy = B.sim.atkTc; rec.tcBuild = tcLvl();
+  replaying = false; recording = true; bSteps = 0; battleAcc = 0; battleLordColor = -1; if (B.sim.atkEnemy >= 0) if (Enemy* ae = findEnemy(B.sim.atkEnemy)) battleLordColor = ae->color; applyEnemyPalette(battleLordColor); rec = replayCapture(B.sim, 2, 1.f / 60.f); rec.lordColor = battleLordColor; rec.tcMine = tcLvl(); rec.tcEnemy = B.sim.atkTc; rec.tcBuild = tcLvl();
   centerCamera();
 }
 static void finishDefence() { B.done = true; defRep = applyDefence(B.sim); hasDef = true;
@@ -709,6 +796,7 @@ static void startReplay(int idx) {
   if (idx < 0 || idx >= (int)S.replays.size()) return;
   repCur = S.replays[idx]; modal = M_NONE; selId = -1; buildMode = false; explSel = -1; incoming = false;
   B.kind = repCur.defence ? K_DEFENCE : repCur.kind == 1 ? K_RIVAL : K_BARB; B.done = false; scout.tc = repCur.tcBuild; scout.rival = repCur.kind == 1;
+  battleLordColor = repCur.lordColor; applyEnemyPalette(battleLordColor);
   replaying = true; recording = false; rpPaused = false; rpSpeed = 1; RP.start(repCur, B.sim); fxClear(); view = V_BATTLE; centerCamera();
 }
 static std::string agoStr(long long when) { long long d = (long long)std::time(nullptr) - when; if (d < 60) return "just now"; if (d < 3600) return std::to_string(d / 60) + " min ago"; if (d < 86400) return std::to_string(d / 3600) + " h ago"; return std::to_string(d / 86400) + " d ago"; }
@@ -726,7 +814,7 @@ static void raidCheck() {
 static const char* hint() {
   if (buildMode && bmPaint) return "Tap or drag to place pieces. Tap a wall piece with the Gate tool to make a gate.";
   if (buildMode && bmMoveId >= 0) return "Tap the map to choose the new spot, then press Move here";
-  if (buildMode) return !bmOk && !isExplored(bmx, bmy) ? "That land is hidden in the fog - explore it with a scout first" : "Tap the map to move the building, then press Place";
+  if (buildMode) return !bmOk && !bmWhy.empty() ? bmWhy.c_str() : "Tap the map to move the building, then press Place";
   auto has = [](BType t) { for (auto& b : S.b) if (b.type == t) return true; return false; };
   if (!has(B_LUMBER)) return "1. Build a Lumber Camp (Build menu) next to the trees";
   if (!has(B_FARM)) return "2. Build a Farm for food";
@@ -734,6 +822,7 @@ static const char* hint() {
   bool brDone = false; for (auto& b : S.b) if (b.type == B_BARRACKS && isDone(b)) brDone = true;
   if (armyCount() + queuedPop() < 3 && brDone) return "4. Select the Barracks and train some Militia";
   if (S.renown == 0 && armyCount() >= 3) return "5. Press Raid and attack Barbarian Camp 1";
+  { bool disc = false; for (auto& e : S.enemies) if (enemyDiscovered(e)) disc = true; if (!S.enemies.empty() && !disc && tcLvl() >= 3 && S.renown > 0) return "Send scouts (Explore) to find your rival lord in another quadrant"; }
   bool anyBuild = false; for (auto& b : S.b) if (b.building) anyBuild = true;
   if (tcLvl() < MAXTC && !anyBuild) return tcLvl() < 3 ? "Select the Town Center and upgrade it (Lv3 = Feudal Age)" : tcLvl() < 5 ? "Keep upgrading: Town Center Lv5 = Castle Age" : tcLvl() < 8 ? "Build a Castle (Lv6); Town Center Lv8 = Imperial Age" : "Build Bombard Towers and research Chemistry at the University";
   return "";
@@ -786,26 +875,28 @@ static bool inDiamond(float px, float py, const SDL_FRect& r) { float cx = r.x +
 static void drawMinimap(float x, float y, float w, float h, bool battle) {
   miniR = {x, y, w, h}; block(x - U(6), y - U(6), w + U(12), h + U(12));
   float cx = x + w / 2, cy = y + h / 2;
-  const float N = battle ? (float)MAP : (float)WORLD, O = battle ? 0.f : (float)WEXT;
+  const float N = battle ? (float)SIMN : (float)WORLD, O = battle ? 0.f : (float)WEXT;
   auto mp = [&](float gx, float gy) { Pt r = rotG(gx, gy); float qx = r.x + O, qy = r.y + O; return Pt{cx + (qx - qy) / N * (w / 2), cy + ((qx + qy) / N - 1) * (h / 2)}; };
   auto dia = [&](float grow) { return std::vector<Pt>{{cx, y - grow}, {x + w + grow * 2, cy}, {cx, y + h + grow}, {x - grow * 2, cy}}; };
   { auto sh = dia(U(9)); for (auto& p : sh) p.y += U(4); polyFill(sh, 0x000000, 0.35f); }
   polyFill(dia(U(5)), 0x0b0704); polyFill(dia(U(3.6f)), 0xcfa650); polyFill(dia(U(2.2f)), 0x2a1d12);
   polyFill(dia(0), 0x4d7b37);
-  { float lo = battle ? 0.f : -(float)WEXT, hi = battle ? (float)MAP : (float)(MAP + WEXT); Pt q[4] = {mp(lo, lo), mp(hi, lo), mp(hi, hi), mp(lo, hi)}; G.fillPoly(q, 4, 0x5f9444, 0.5f); }
+  { float lo = battle ? 0.f : -(float)WEXT, hi = battle ? (float)SIMN : (float)(WHI); Pt q[4] = {mp(lo, lo), mp(hi, lo), mp(hi, hi), mp(lo, hi)}; G.fillPoly(q, 4, 0x5f9444, 0.5f); }
   if (!battle) {
     for (auto& n : S.nodes) if (n.amt > 0 && nodeVisible(n) && isExplored(n.x, n.y)) { Pt p = mp(n.x + .5f, n.y + .5f); G.circle(p.x, p.y, U(n.type == N_TREE ? 1.5f : 2.0f), n.type == N_TREE ? 0x1f4a1d : n.type == N_GOLD ? 0xf2c230 : 0xb0b4ba); }
     for (auto& a : S.animals) if (a.alive && a.type == A_WOLF && isExplored((int)std::floor(a.x), (int)std::floor(a.y))) { Pt p = mp(a.x, a.y); G.circle(p.x, p.y, U(1.8f), 0xd04a3a); }
     for (auto& b : S.b) { Pt p = mp(b.x + b.w / 2.f, b.y + b.h / 2.f); float r = U(b.w == 1 ? 1.2f : 1.2f + b.w * 0.9f); uint32_t c = b.type == B_TOWNHALL ? 0xffd34a : b.id == selId ? 0xffffff : (b.type == B_WALL || b.type == B_GATE) ? 0xb8b8b0 : 0x5a8ee8; Pt d[4] = {{p.x, p.y - r * 0.7f}, {p.x + r, p.y}, {p.x, p.y + r * 0.7f}, {p.x - r, p.y}}; G.fillPoly(d, 4, c, 1); }
     for (auto& e : S.expl) { Pt p = mp(e.x, e.y); G.circle(p.x, p.y, U(2.6f), e.id == explSel ? 0xffe27a : 0xffffff); }
-    if (fogTex) { SDL_Color white{255, 255, 255, 255}; float u0 = (-WEXT - FOGMIN) / (float)FOGN, u1 = (MAP + WEXT - FOGMIN) / (float)FOGN; Pt a0 = mp(-(float)WEXT, -(float)WEXT), a1 = mp((float)(MAP + WEXT), -(float)WEXT), a2 = mp((float)(MAP + WEXT), (float)(MAP + WEXT)), a3 = mp(-(float)WEXT, (float)(MAP + WEXT));
+    for (auto& rl : S.relics) if (isExplored((int)std::floor(rl.x), (int)std::floor(rl.y))) { Pt p = mp(rl.x, rl.y); G.circle(p.x, p.y, U(2.4f), 0xfff0a0); G.circle(p.x, p.y, U(1.2f), 0xd09a20); }
+    for (auto& en : S.enemies) if (enemyDiscovered(en)) { int ox, oy; enemyOrigin(en, ox, oy); Pt p = mp(ox + 15.f, oy + 15.f); float r = U(4.2f); Pt d[4] = {{p.x, p.y - r * 0.7f}, {p.x + r, p.y}, {p.x, p.y + r * 0.7f}, {p.x - r, p.y}}; G.fillPoly(d, 4, LORD_COL[clampi(en.color, 0, NLORDCOL - 1)], 1); }
+    if (fogTex) { SDL_Color white{255, 255, 255, 255}; float u0 = (-WEXT - FOGMIN) / (float)FOGN, u1 = (WHI - FOGMIN) / (float)FOGN; Pt a0 = mp(-(float)WEXT, -(float)WEXT), a1 = mp((float)(WHI), -(float)WEXT), a2 = mp((float)(WHI), (float)(WHI)), a3 = mp(-(float)WEXT, (float)(WHI));
       SDL_Vertex v[4] = {{{a0.x, a0.y}, white, {u0, u0}}, {{a1.x, a1.y}, white, {u1, u0}}, {{a2.x, a2.y}, white, {u1, u1}}, {{a3.x, a3.y}, white, {u0, u1}}}; int idx[6] = {0, 1, 2, 0, 2, 3}; SDL_RenderGeometry(G.r, fogTex, v, 4, idx, 6); }
   } else {
     for (auto& b : B.sim.b) { if (b.trap) continue; Pt p = mp(b.x + b.w / 2.f, b.y + b.h / 2.f); float r = U(b.w == 1 ? 1.1f : 1.2f + b.w * 0.9f); uint32_t c = b.dead ? 0x2a2420 : b.wall ? 0xa8a8a0 : (B.kind == K_DEFENCE ? 0x5a8ee8 : 0xd8503e); Pt d[4] = {{p.x, p.y - r * 0.7f}, {p.x + r, p.y}, {p.x, p.y + r * 0.7f}, {p.x - r, p.y}}; G.fillPoly(d, 4, c, 1); }
-    for (auto& u : B.sim.units) { Pt p = mp(clampf(u.x, 0, MAP), clampf(u.y, 0, MAP)); G.circle(p.x, p.y, U(2.2f), (u.def != (B.kind == K_DEFENCE)) ? 0xff6a50 : 0x7fb4ff); }
+    for (auto& u : B.sim.units) { Pt p = mp(clampf(u.x, 0, SIMN), clampf(u.y, 0, SIMN)); G.circle(p.x, p.y, U(2.2f), (u.def != (B.kind == K_DEFENCE)) ? 0xff6a50 : 0x7fb4ff); }
   }
   Pt vp[4]; Pt corners[4] = {toGrid(0, 0), toGrid((float)G.W, 0), toGrid((float)G.W, (float)G.H), toGrid(0, (float)G.H)};
-  float vlo = battle ? -2.f : -(float)WEXT - 2.f, vhi = battle ? (float)MAP + 2.f : (float)(MAP + WEXT) + 2.f;
+  float vlo = battle ? -2.f : -(float)WEXT - 2.f, vhi = battle ? (float)SIMN + 2.f : (float)(WHI) + 2.f;
   for (int i = 0; i < 4; i++) vp[i] = mp(clampf(corners[i].x, vlo, vhi), clampf(corners[i].y, vlo, vhi));
   G.strokePoly(vp, 4, 0xffffff, 0.9f);
   if (in.down && inDiamond(in.px, in.py, miniR) && modal == M_NONE) {
@@ -831,6 +922,7 @@ static void drawModal() {
     case M_INTRO: {
       flowTitle(f, "Dawn of Kings", C_GOLD);
       flowPara(f, "Your Town Center, a House and a Watch Tower are all you have. Gather resources, train troops, raid barbarians and rival lords, and climb the ranks from Peasant to Emperor.", C_TXT);
+      flowPara(f, "The world is four quadrants. You hold one; somewhere in the others a rival lord is building his own village, and more may settle later. Find them with scouts (Explore) and wipe them out - they will come for you too. From Town Center 4 you may build outposts beyond your quadrant.", C_DIM, F_S);
       flowPara(f, "Drag to pan. Mouse wheel / pinch to zoom. Tap buildings to select them. The speed button (top right) fast-forwards timers while you explore. Everything runs offline.");
       if (flowBtn(f, "Begin", 1)) { modal = M_NONE; S.seenIntro = true; }
       break;
@@ -843,6 +935,7 @@ static void drawModal() {
         flowPara(f, welcome.rep.who + " attacked while you were away: " + std::to_string(welcome.rep.stars) + " star(s), " + std::to_string(welcome.rep.pct) + "% damaged (rebuilt).", C_TXT);
         flowCost(f, "Stolen:", welcome.rep.stolen, false); flowPara(f, "Renown " + std::string(welcome.rep.dr >= 0 ? "+" : "") + std::to_string(welcome.rep.dr) + " -> " + std::to_string(S.renown), C_TXT);
       }
+      if (welcome.raided && welcome.rep.ruined) flowPara(f, "Your village was completely destroyed! Most of your stores were taken and every outpost, explorer and squad outside the safe zone was lost.", C_BAD);
       if (welcome.outpost) flowPara(f, outRep.lostB ? "Raiders hit your outposts " + outRep.where + " while you were away: " + std::to_string(outRep.lostB) + " building(s) and " + std::to_string(outRep.lostV) + " villager(s) lost for good." : std::string("Raiders attacked your outposts while you were away, but your defences held."), outRep.lostB ? C_BAD : C_OK);
       if ((welcome.raided || (welcome.outpost && outRep.replayed)) && !S.replays.empty() && flowBtn(f, "Watch replay")) { SDL_RenderSetClipRect(G.r, nullptr); startReplay(0); return; }
       if (flowBtn(f, "Continue", 1)) modal = M_NONE; break;
@@ -865,14 +958,30 @@ static void drawModal() {
           G.text(d.name, tx0, f.y + U(7), F_M, err ? 0x8a8478 : C_TXT);
           G.text(err ? err : d.desc, tx0, f.y + U(32), F_S, err ? C_BAD : C_DIM);
           drawCost(f.x0 + f.maxW - U(10), f.y + U(7), d.cost, A_RIGHT);
-          G.text((isPiece(t) ? std::string("instant") : "time " + fmtTime(d.time)) + "  " + std::to_string(buildCount((BType)t)) + "/" + std::to_string(bmaxn(t, tcLvl())), f.x0 + f.maxW - U(10), f.y + U(32), F_S, C_DIM, A_RIGHT);
+          G.text((isPiece(t) ? std::string("instant") : "time " + fmtTime(d.time)) + "  " + std::to_string(buildCountAt((BType)t, false)) + "/" + std::to_string(bmaxn(t, tcLvl())) + (bmaxOut(t, tcLvl()) ? "  +outpost " + std::to_string(buildCountAt((BType)t, true)) + "/" + std::to_string(bmaxOut(t, tcLvl())) : std::string()), f.x0 + f.maxW - U(10), f.y + U(32), F_S, C_DIM, A_RIGHT);
           f.y += rh + U(6);
         }
       }
       if (flowBtn(f, "Close")) modal = M_NONE; break;
     }
     case M_ARMY: {
-      flowTitle(f, "Army", C_TXT); flowPara(f, "Housing " + std::to_string(armyCount()) + " + " + std::to_string(queuedPop()) + " queued / " + std::to_string(housing()) + ". Train units at the Barracks and Archery Range.");
+      flowTitle(f, "Army", C_TXT); flowPara(f, "Housing " + std::to_string(armyCount()) + " at home + " + std::to_string(fieldPop()) + " in the field + " + std::to_string(queuedPop()) + " queued / " + std::to_string(housing()) + ". Train units at the Barracks and Archery Range.");
+      if (flowBtn(f, "Field squads (" + std::to_string(S.squads.size()) + ")  - send troops out on the map", 1)) { modal = M_SQUADS; modalScroll = 0; }
+      flowNl(f);
+      flowTitle(f, "Army presets", C_GOLD, F_M);
+      flowPara(f, "Save a few army layouts and train a whole one with a tap. Cost and training time are exactly the same as training each unit by hand.", C_DIM, F_S);
+      for (int p = 0; p < NPRESET; p++) {
+        int tot = 0; std::string sm; for (int i = 0; i < U_COUNT; i++) if (S.presets[p][i]) { tot += S.presets[p][i]; sm += std::to_string(S.presets[p][i]) + " " + udef(i).tag + "  "; }
+        float rh = U(66); G.gradRRect(f.x0, f.y, f.maxW, rh, U(8), 0x3a2c20, 0x261a12, 0.9f); G.rrect(f.x0, f.y, f.maxW, U(1.2f), U(1), 0xcfa650, 0.35f);
+        G.text("Preset " + std::to_string(p + 1), f.x0 + U(10), f.y + U(5), F_M, tot ? C_TXT : 0x8a8478);
+        G.text(tot ? sm : "empty - tap Edit to set it up", f.x0 + U(10), f.y + U(32), F_S, C_DIM);
+        if (tot) drawCost(f.x0 + U(120), f.y + U(8), presetCost(S.presets[p]), A_LEFT, true);
+        float bw = U(78), bh = U(34), by = f.y + (rh - bh) / 2;
+        if (uiButton(f.x0 + f.maxW - bw * 2 - U(14), by, bw, bh, "Train", 1, tot > 0, F_S)) queuePreset(p);
+        if (uiButton(f.x0 + f.maxW - bw - U(6), by, bw, bh, "Edit", 0, true, F_S)) { presetEdit = p; modal = M_PRESET; modalScroll = 0; }
+        f.y += rh + U(6);
+      }
+      flowTitle(f, "Units", C_GOLD, F_M);
       for (int i = 0; i < U_COUNT; i++) {
         const UDef& u = udef(i); bool locked = u.unlock > tcLvl(); float rh = U(52);
         G.gradRRect(f.x0, f.y, f.maxW, rh, U(8), 0x3a2c20, 0x261a12, 0.9f); G.rrect(f.x0, f.y, f.maxW, U(1.2f), U(1), 0xcfa650, 0.35f);
@@ -885,12 +994,33 @@ static void drawModal() {
       }
       if (flowBtn(f, "Close")) modal = M_NONE; break;
     }
+    case M_PRESET: {
+      int* pr = S.presets[presetEdit];
+      flowTitle(f, "Edit preset " + std::to_string(presetEdit + 1), C_TXT);
+      { int tot = 0; for (int i = 0; i < U_COUNT; i++) tot += pr[i]; flowCost(f, "Cost of this army:", presetCost(pr), true); flowPara(f, std::to_string(tot) + " units, " + std::to_string(presetPop(pr)) + " housing. Units train at their buildings in parallel.", C_DIM, F_S); }
+      if (flowBtn(f, "Copy my current army")) { for (int i = 0; i < U_COUNT; i++) pr[i] = S.army[i]; }
+      if (flowBtn(f, "Clear")) { for (int i = 0; i < U_COUNT; i++) pr[i] = 0; }
+      flowNl(f);
+      for (int i = 0; i < U_COUNT; i++) {
+        const UDef& u = udef(i); bool locked = u.unlock > tcLvl(); float rh = U(46);
+        G.gradRRect(f.x0, f.y, f.maxW, rh, U(8), 0x3a2c20, 0x261a12, 0.9f);
+        if (const SpriteDef* sp = unitSpriteFor(i, false, 3, 0)) drawIcon(*sp, f.x0 + U(26), f.y + rh / 2 + U(2), U(44), locked ? 0.35f : 1.f);
+        G.text(u.name, f.x0 + U(54), f.y + U(5), F_M, locked ? 0x8a8478 : C_TXT); G.text(locked ? "needs TC Lv" + std::to_string(u.unlock) : costStr(u.cost), f.x0 + U(54), f.y + U(27), F_S, locked ? C_BAD : C_DIM);
+        float bw = U(40), bh = U(34), by = f.y + (rh - bh) / 2, rx = f.x0 + f.maxW - U(8);
+        if (uiButton(rx - bw, by, bw, bh, "+", 0, !locked && pr[i] < 99, F_M)) pr[i]++;
+        G.textShadow(std::to_string(pr[i]), rx - bw - U(26), f.y + U(10), F_L, pr[i] ? C_GOLD : 0x6a6258, A_CENTER);
+        if (uiButton(rx - bw * 2 - U(52), by, bw, bh, "-", 0, pr[i] > 0, F_M)) pr[i]--;
+        f.y += rh + U(5);
+      }
+      if (flowBtn(f, "Done", 1)) { modal = M_ARMY; modalScroll = 0; } break;
+    }
     case M_LADDER: {
       struct E { std::string n; int r; bool me; }; std::vector<E> all; for (auto& l : lords()) all.push_back({l.name, lordRenown(l), false}); all.push_back({"You", S.renown, true});
       std::stable_sort(all.begin(), all.end(), [](const E& a, const E& b) { return a.r != b.r ? a.r > b.r : a.me && !b.me; });
       int me = 0; for (int i = 0; i < (int)all.size(); i++) if (all[i].me) me = i;
       flowTitle(f, "Ladder", C_TXT);
       flowPara(f, "Season " + std::to_string(S.season) + "  -  ends in " + fmtTime(seasonLeft()) + "  -  raids won " + std::to_string(S.sWins) + ", defences held " + std::to_string(S.sDef), C_DIM, F_S);
+      if (S.meta.prestige > 0) flowPara(f, "Prestige " + std::to_string(S.meta.prestige), C_GOLD, F_S);
       flowPara(f, std::string("Rank: ") + rankOf(S.renown) + "   Position #" + std::to_string(me + 1) + " of " + std::to_string(all.size()) + "   Renown " + std::to_string(S.renown), C_GOLD);
       int from = clampi(me - 5, 0, (int)all.size() - 11);
       for (int i = from; i < from + 11; i++) {
@@ -904,6 +1034,17 @@ static void drawModal() {
       flowTitle(f, "Raid", C_TXT);
       std::string a; for (int i = 0; i < U_COUNT; i++) if (S.army[i]) a += std::string(udef(i).name) + " x" + std::to_string(S.army[i]) + "   ";
       flowPara(f, "Army: " + (a.empty() ? std::string("none - train troops at the Barracks") : a));
+      flowTitle(f, "Rival lords on the map", C_GOLD, F_M);
+      { bool any = false; for (auto& e : S.enemies) {
+          if (!enemyDiscovered(e)) continue; any = true; float rh = U(58); bool en = armyCount() > 0;
+          if (uiButton(f.x0, f.y, f.maxW - U(88), rh, "", 0, en)) { startEnemy(e.id); SDL_RenderSetClipRect(G.r, nullptr); return; }
+          if (uiButton(f.x0 + f.maxW - U(82), f.y, U(82), rh, "Talk", 0, true, F_S)) { diploEnemy = e.id; diploMsg.clear(); modal = M_DIPLO; modalScroll = 0; SDL_RenderSetClipRect(G.r, nullptr); return; }
+          int diff = e.seenTc - tcLvl(); std::vector<int> si; int nb = (int)enemyBaseAt(e, e.seenTc, e.seenDead, &si).buildings.size();
+          G.text(std::string(LORD_COL_NAME[clampi(e.color, 0, NLORDCOL - 1)]) + " lord " + e.name + "  -  Town Center Lv" + std::to_string(e.seenTc) + "  (" + stanceName(e.stance) + ")", f.x0 + U(10), f.y + U(5), F_M, en ? mixc(LORD_COL[clampi(e.color, 0, NLORDCOL - 1)], 0xffffff, 0.3f) : 0x7a8696);
+          G.text(std::string(diff == 0 ? "same level as you" : diff > 0 ? std::to_string(diff) + " above you" : std::to_string(-diff) + " below you") + "  -  " + std::to_string(nb) + " buildings  -  " + PERSONALITY[e.pers], f.x0 + U(10), f.y + U(32), F_S, C_DIM);
+          f.y += rh + U(6);
+        }
+        if (!any) flowPara(f, S.enemies.empty() ? "No rival lord has settled yet - one may appear in an empty quadrant." : "A rival lord lives in another quadrant. Send scouts (Explore) across the map to find them.", C_DIM, F_S); }
       flowTitle(f, "Barbarian Camps", C_GOLD, F_M);
       { int unl = campsUnlocked(); flowPara(f, std::to_string(unl) + " of " + std::to_string(NCAMP) + " camps unlocked (raise your Town Center for more). Clearing a camp again pays only 50%, then 25%, then 10% of its loot.", C_DIM, F_S);
         for (int i = 1; i <= std::min(NCAMP, unl + 1); i++) {
@@ -930,8 +1071,10 @@ static void drawModal() {
       int towers = 0; for (auto& b : scout.base.buildings) if (b.dps > 0) towers++;
       flowPara(f, std::to_string(towers) + " towers, " + std::to_string(scout.base.buildings.size()) + " buildings.");
       flowPara(f, "Renown: +" + std::to_string(scout.win) + " for a win, -" + std::to_string(scout.lose) + " for a loss.", C_TXT);
-      if (flowBtn(f, "Attack", 1)) beginBattle();
-      if (scout.rival && flowBtn(f, "Next (30 gold)")) findRival(false);
+      if (scout.fromSquad >= 0) if (Squad* sq = findSquad(scout.fromSquad)) flowPara(f, "Your squad of " + std::to_string(sq->u.size()) + " troops stands at the gates. Only these troops will fight.", C_GOLD, F_S);
+      if (scout.sneak) flowPara(f, "You are not at war with this lord. Attacking without warning breaks every treaty with him, and other lords will trust you less.", C_BAD, F_S);
+      if (flowBtn(f, scout.sneak ? "Attack without warning" : "Attack", scout.sneak ? 2 : 1)) beginBattle();
+      if (scout.rival && scout.enemyId < 0 && flowBtn(f, "Next (30 gold)")) findRival(false);
       if (flowBtn(f, "Cancel")) modal = M_NONE; break;
     }
     case M_ATK_RESULT: {
@@ -940,7 +1083,7 @@ static void drawModal() {
       flowCost(f, "Loot:", atk.got, false);
       flowPara(f, "Renown " + std::string(atk.dr >= 0 ? "+" : "") + std::to_string(atk.dr) + " -> " + std::to_string(S.renown) + " (" + rankOf(S.renown) + ")", C_TXT);
       std::string sv; for (int i = 0; i < U_COUNT; i++) if (atk.surv[i]) sv += std::string(udef(i).name) + " x" + std::to_string(atk.surv[i]) + "  ";
-      flowPara(f, "Surviving troops return home: " + (sv.empty() ? std::string("none") : sv));
+      flowPara(f, "Troops committed to the battle (they do not come home): " + (sv.empty() ? std::string("none - nothing was lost") : sv), C_DIM);
       if (!S.replays.empty() && flowBtn(f, "Watch replay")) { SDL_RenderSetClipRect(G.r, nullptr); startReplay(0); return; }
       if (flowBtn(f, "Return Home", 1)) goHome(); break;
     }
@@ -950,7 +1093,8 @@ static void drawModal() {
       flowPara(f, "Attacker: Town Center Lv" + std::to_string(defRep.atkTc) + (defRep.diff == 0 ? " (same level as you)" : defRep.diff > 0 ? " (" + std::to_string(defRep.diff) + " above you)" : " (" + std::to_string(-defRep.diff) + " below you)"), defRep.diff > 0 ? C_OK : defRep.diff < 0 ? C_BAD : C_DIM, F_S);
       flowCost(f, "Stolen:", defRep.stolen, false);
       flowPara(f, "Renown " + std::string(defRep.dr >= 0 ? "+" : "") + std::to_string(defRep.dr) + " -> " + std::to_string(S.renown), C_TXT);
-      flowPara(f, "Tip: more towers and upgrades reduce losses. A shield protects you for a short while.");
+      if (defRep.ruined) { flowPara(f, "YOUR VILLAGE WAS COMPLETELY DESTROYED! " + defRep.who + "'s army took most of your stores and swept through everything outside your safe zone: " + std::to_string(defRep.lostB) + " outpost building(s), " + std::to_string(defRep.lostV) + " villager(s) and " + std::to_string(defRep.lostU) + " troop(s) in the field are gone. Your village itself stands and is rebuilt for free.", C_BAD); }
+      flowPara(f, "A shield now protects your village from raids for " + fmtTime(shieldSeconds(tcLvl(), defRep.stars)) + ". Tip: more towers and upgrades reduce losses.");
       if (!S.replays.empty() && flowBtn(f, "Watch replay")) { SDL_RenderSetClipRect(G.r, nullptr); startReplay(0); return; }
       if (flowBtn(f, "Continue", 1)) goHome(); break;
     }
@@ -962,7 +1106,7 @@ static void drawModal() {
       if (flowBtn(f, "Begin the next season", 1)) modal = M_NONE; break;
     }
     case M_EXPLORE: {
-      int ex = 0; for (int y = -WEXT; y < MAP + WEXT; y++) for (int x = -WEXT; x < MAP + WEXT; x++) if (isExplored(x, y)) ex++;
+      int ex = 0; for (int y = -WEXT; y < WHI; y++) for (int x = -WEXT; x < WHI; x++) if (isExplored(x, y)) ex++;
       flowTitle(f, "Exploration", C_TXT);
       flowPara(f, "Explored " + std::to_string(100 * ex / (WORLD * WORLD)) + "% of the land. Beyond your village lie forests, gold and stone, herds of deer and boar, wolves, and buried treasure.");
       flowPara(f, "Build a Mill near animals to hunt for food. Anything you build or send out there is outside your walls: raiders can destroy it, and it is lost forever. Defend outposts with towers and walls.", C_DIM, F_S);
@@ -974,9 +1118,16 @@ static void drawModal() {
       flowNl(f);
       if (flowBtn(f, "Send a Villager exploring (" + std::to_string(std::max(0, idleV())) + " idle)", 0, idleV() > 0)) { if (sendExplorer(true)) { explSel = S.expl.back().id; modal = M_NONE; } }
       flowNl(f);
+      if (flowBtn(f, "Field squads (" + std::to_string(S.squads.size()) + ")  - escort, guard and fight", 0)) { modal = M_SQUADS; modalScroll = 0; }
+      flowNl(f);
+      flowTitle(f, "Relics", C_GOLD, F_M);
+      { int onMap = 0; for (auto& rl : S.relics) if (isExplored((int)std::floor(rl.x), (int)std::floor(rl.y))) onMap++;
+        flowPara(f, "Held: " + std::to_string(S.relicsHeld) + "  (+" + std::to_string((int)relicGoldPerMin()) + " gold/min with a Monastery)   -   known on the map: " + std::to_string(onMap) + ". Send a Monk, tap the map next to a relic and he carries it back to the Monastery.", C_DIM, F_S); }
+      if (flowBtn(f, "Send a Monk (" + std::to_string(S.army[U_MONK]) + " available)", 0, S.army[U_MONK] > 0)) { if (sendMonk()) { explSel = S.expl.back().id; modal = M_NONE; } }
+      flowNl(f);
       if (!S.expl.empty()) flowTitle(f, "In the field", C_GOLD, F_M);
       int k = 0; for (auto& e : S.expl) {
-        k++; int id = e.id; std::string who = std::string(e.vill ? "Villager" : "Scout") + " #" + std::to_string(k) + (e.autoX ? "  (auto)" : e.go ? "  (moving)" : "  (waiting)");
+        k++; int id = e.id; std::string who = std::string(e.vill ? "Villager" : e.monk ? (e.carry ? "Monk (carrying a relic)" : "Monk") : "Scout") + " #" + std::to_string(k) + (e.autoX ? "  (auto)" : e.go ? "  (moving)" : "  (waiting)");
         flowPara(f, who, C_TXT);
         if (flowBtn(f, "Select")) { explSel = id; modal = M_NONE; }
         if (flowBtn(f, e.autoX ? "Auto: ON" : "Auto-explore", e.autoX ? 1 : 0)) { if (Explorer* ep = findExplorer(id)) { ep->autoX = !ep->autoX; if (ep->autoX) ep->go = false; } }
@@ -1011,6 +1162,67 @@ static void drawModal() {
       }
       if (flowBtn(f, "Close")) modal = M_NONE; break;
     }
+    case M_DIPLO: {
+      Enemy* e = findEnemy(diploEnemy); if (!e) { modal = M_NONE; break; }
+      flowTitle(f, e->name + "  (" + LORD_COL_NAME[clampi(e->color, 0, NLORDCOL - 1)] + ")", mixc(LORD_COL[clampi(e->color, 0, NLORDCOL - 1)], 0xffffff, 0.3f));
+      flowPara(f, std::string("Town Center Lv") + std::to_string(e->seenTc) + "  -  " + PERSONALITY[e->pers] + "  -  " + stanceName(e->stance) + "  -  trust " + std::to_string((int)e->trust) + "/5", C_TXT);
+      static const char* fx[4] = {"At war: his raiders attack your village and outposts, and you may attack him freely.", "At peace: his raiders leave you alone. You may open a trade route.", "Trade route: gold and goods flow in from this lord (needs your Market). You may ask for an alliance.", "Allied: he sends troops to help defend your village and shares his view of the map. Trade pays more."};
+      flowPara(f, fx[clampi(e->stance, 0, 3)], C_DIM, F_S);
+      if (!diploMsg.empty()) flowPara(f, diploMsg, C_GOLD, F_S);
+      if (S.t < e->talkAt) flowPara(f, "He will not talk for " + fmtTime(e->talkAt - S.t) + ".", C_BAD, F_S);
+      auto offer = [&](const char* label, int p) {
+        const char* why = diploBlock(*e, p); std::string lb = std::string(label) + "  (" + std::to_string((int)std::round(diploChance(*e, p) * 100)) + "% chance)";
+        if (flowBtn(f, lb, 1, why == nullptr)) diploPropose(e->id, p, diploMsg); flowNl(f); if (why) { flowPara(f, why, C_DIM, F_S); }
+      };
+      if (e->stance == ST_WAR) offer("Propose peace", DP_PEACE);
+      if (e->stance == ST_PEACE) offer("Open a trade route", DP_TRADE);
+      if (e->stance == ST_TRADE) offer("Propose an alliance", DP_ALLY);
+      if (e->stance >= ST_TRADE) { Cost inc = tradeIncome(*e); flowCost(f, "This route pays per minute:", inc, false); }
+      { Cost gc = diploGiftCost(*e); if (flowBtn(f, "Send a gift  " + costStr(gc), 0, canAfford(gc))) diploGift(e->id, diploMsg); flowNl(f); }
+      if (e->stance == ST_TRADE) { if (flowBtn(f, "Cancel the trade route", 0)) { e->stance = ST_PEACE; diploMsg = "The trade route is closed."; } flowNl(f); }
+      if (e->stance == ST_ALLY) { if (flowBtn(f, "Break the alliance", 0)) { e->stance = ST_TRADE; e->trust = std::max(0.f, e->trust - 1); diploMsg = "The alliance is over; trade continues."; } flowNl(f); }
+      if (e->stance >= ST_PEACE) { if (flowBtn(f, "Declare war", 2)) { diploWar(e->id, false); diploMsg = "You declare war on " + e->name + ". His raiders will come for you."; } flowNl(f); }
+      if (e->stance >= ST_PEACE) { if (flowBtn(f, "Attack without warning", 2, armyCount() > 0)) { startEnemy(e->id); SDL_RenderSetClipRect(G.r, nullptr); return; } flowNl(f); }
+      else { if (flowBtn(f, "Attack", 1, armyCount() > 0)) { startEnemy(e->id); SDL_RenderSetClipRect(G.r, nullptr); return; } flowNl(f); }
+      if (flowBtn(f, "Close")) modal = M_NONE; break;
+    }
+    case M_SQUADS: {
+      flowTitle(f, "Field squads", C_TXT);
+      flowPara(f, "Troops you form into a squad leave the army and walk the map in real time. They fight wild animals, escort villagers, monks and scouts, guard your outposts and hunters, and can march on a rival lord. Troops in the field still need housing, and the ones you send into battle do not come back.", C_DIM, F_S);
+      flowTitle(f, "Form a squad", C_GOLD, F_M);
+      { bool any = false; int tot = 0;
+        for (int i = 0; i < U_COUNT; i++) { sqForm[i] = std::min(sqForm[i], S.army[i]); tot += sqForm[i]; if (S.army[i] <= 0) continue; any = true;
+          const UDef& u = udef(i); float rh = U(44); G.gradRRect(f.x0, f.y, f.maxW, rh, U(8), 0x3a2c20, 0x261a12, 0.9f);
+          if (const SpriteDef* sp = unitSpriteFor(i, false, 3, 0)) drawIcon(*sp, f.x0 + U(26), f.y + rh / 2 + U(2), U(42));
+          G.text(u.name, f.x0 + U(54), f.y + U(4), F_M, C_TXT); G.text(std::to_string(S.army[i]) + " at home", f.x0 + U(54), f.y + U(25), F_S, C_DIM);
+          float bw = U(40), bh = U(32), by = f.y + (rh - bh) / 2, rx = f.x0 + f.maxW - U(8);
+          if (uiButton(rx - bw, by, bw, bh, "+", 0, sqForm[i] < S.army[i], F_M)) sqForm[i]++;
+          G.textShadow(std::to_string(sqForm[i]), rx - bw - U(24), f.y + U(8), F_L, sqForm[i] ? C_GOLD : 0x6a6258, A_CENTER);
+          if (uiButton(rx - bw * 2 - U(50), by, bw, bh, "-", 0, sqForm[i] > 0, F_M)) sqForm[i]--;
+          f.y += rh + U(5); }
+        if (!any) flowPara(f, "No troops at home. Train some at the Barracks first.", C_DIM, F_S);
+        if (flowBtn(f, "Form squad (" + std::to_string(tot) + " troops)", 1, tot > 0)) { if (formSquad(sqForm)) { for (int i = 0; i < U_COUNT; i++) sqForm[i] = 0; sqSel = S.squads.back().id; modal = M_NONE; } }
+        flowNl(f); }
+      if (!S.squads.empty()) flowTitle(f, "In the field", C_GOLD, F_M);
+      int kq = 0; for (auto& q : S.squads) { kq++; int id = q.id; std::map<int, int> cnt; for (auto& u : q.u) cnt[u.type]++; std::string comp; for (auto& kv : cnt) comp += std::to_string(kv.second) + " " + udef(kv.first).tag + "  ";
+        static const char* md[4] = {"standing by", "escorting", "guarding", "marching on a lord"};
+        flowPara(f, "Squad #" + std::to_string(kq) + ": " + comp + "- " + (q.recall ? "returning" : md[clampi(q.mode, 0, 3)]) + ", " + std::to_string((int)(squadHpFrac(q) * 100)) + "% health", C_TXT);
+        if (flowBtn(f, "Select")) { sqSel = id; modal = M_NONE; }
+        if (flowBtn(f, "Recall", 2)) squadRecall(id);
+        flowNl(f); }
+      if (flowBtn(f, "Close")) modal = M_NONE; break;
+    }
+    case M_PRESTIGE: {
+      flowTitle(f, "Prestige", C_GOLD);
+      flowPara(f, "Prestige " + std::to_string(S.meta.prestige) + "  -  " + std::to_string(S.meta.points) + " point(s) to spend. Reach the maximum Town Center and you may ascend: your realm starts over and you earn a point for a permanent unlock.", C_TXT);
+      for (int i = 0; i < NPRESTIGE; i++) {
+        float rh = U(60); bool has = prestigeHas(i), can = !has && S.meta.points >= PRESTIGE[i].cost;
+        G.gradRRect(f.x0, f.y, f.maxW, rh, U(8), 0x3a2c20, 0x261a12, 0.9f); G.text(PRESTIGE[i].name, f.x0 + U(10), f.y + U(5), F_M, has ? C_OK : C_TXT); G.text(PRESTIGE[i].desc, f.x0 + U(10), f.y + U(32), F_S, C_DIM);
+        if (uiButton(f.x0 + f.maxW - U(104), f.y + (rh - U(34)) / 2, U(96), U(34), has ? "Unlocked" : "Unlock " + std::to_string(PRESTIGE[i].cost), can ? 1 : 0, can, F_S)) { prestigeBuy(i); saveGame(); }
+        f.y += rh + U(5);
+      }
+      if (flowBtn(f, "Back")) { modal = M_SETTINGS; modalScroll = 0; } break;
+    }
     case M_SETTINGS: {
       flowTitle(f, "Options", C_TXT);
       if (flowBtn(f, std::string("Music: ") + (S.musicOn ? "ON" : "OFF"), S.musicOn ? 1 : 0)) { S.musicOn = !S.musicOn; audioSetEnabled(S.musicOn, S.sfxOn); saveGame(); }
@@ -1019,6 +1231,13 @@ static void drawModal() {
       if (!audioDeviceOpen()) flowPara(f, "No audio output device was found, so the game is silent.", C_BAD, F_S);
       flowPara(f, "Season " + std::to_string(S.season) + " ends in " + fmtTime(seasonLeft()) + ". All music and sound is generated on your device; the game never goes online.", C_DIM, F_S);
       flowPara(f, "Controls: drag = pan, wheel / pinch = zoom, tap = select / place / deploy. Dev keys: F1 resources, F2 raid, F3 town center level, F4 end the season.", C_DIM, F_S);
+      flowTitle(f, "Realm", C_GOLD, F_M);
+      flowPara(f, "Prestige " + std::to_string(S.meta.prestige) + "  -  " + std::to_string(S.meta.points) + " point(s). " + (prestigeAvailable() ? "Your Town Center is at the maximum level: you may ascend." : "Reach Town Center Lv" + std::to_string(MAXTC) + " to ascend."), C_DIM, F_S);
+      if (flowBtn(f, "Prestige rewards")) { modal = M_PRESTIGE; modalScroll = 0; }
+      if (flowBtn(f, armAscend ? "Tap again to ascend (start over, +1 point)" : "Ascend (prestige)", armAscend ? 2 : 1, prestigeAvailable())) { if (armAscend) { restartGame(true); SDL_RenderSetClipRect(G.r, nullptr); return; } armAscend = true; armRestart = false; }
+      flowNl(f);
+      if (flowBtn(f, armRestart ? "Tap again: erase everything and start over" : "Restart the game", armRestart ? 2 : 0)) { if (armRestart) { restartGame(false); SDL_RenderSetClipRect(G.r, nullptr); return; } armRestart = true; armAscend = false; }
+      flowPara(f, "Restart returns you to Town Center 1 in a brand new world with new rival lords. Prestige points and unlocks are kept.", C_DIM, F_S);
       if (flowBtn(f, "Close", 1)) modal = M_NONE; break;
     }
     default: break;
@@ -1069,7 +1288,7 @@ static void drawPanel() {
     if (flowBtn(f, "-", 0, true, U(40))) setWorkers(*b, -1);
     flowText(f, std::to_string(b->workers) + "/" + std::to_string(slots), C_GOLD);
     if (flowBtn(f, "+", 0, true, U(40))) setWorkers(*b, 1);
-    flowText(f, "~" + std::to_string(roundi(b->workers * d.rate * mult)) + " " + RES_NAME[d.res] + "/min", C_DIM, F_S); flowNl(f);
+    flowText(f, "~" + std::to_string(roundi(b->workers * d.rate * mult * gatherMul(d.res))) + " " + RES_NAME[d.res] + "/min", C_DIM, F_S); flowNl(f);
     if (b->status == 4) flowPara(f, d.node == N_GAME ? "No wild game within 9 tiles. Explore to find herds, or build the Mill closer to them." : "The deposits here ran out. New ones grow elsewhere in your village (see the minimap): demolish this camp and build a new one beside them.", C_BAD, F_S);
     if (d.node == N_GAME) flowPara(f, "Boars and wolves fight back: towers within 9 tiles protect your hunters.", C_DIM, F_S);
     if (b->status == 3) flowPara(f, "Storage full - spend some!", C_BAD, F_S);
@@ -1085,6 +1304,7 @@ static void drawPanel() {
     if (!b->q.empty()) { std::string q = "Training: "; for (auto& it : b->q) q += std::string(udef(it.type).tag) + " "; flowPara(f, q + "(" + std::to_string((int)std::ceil(b->q[0].left)) + "s)", C_DIM, F_S); }
   }
   if (isDone(*b) && d.dps[0] > 0) flowPara(f, std::to_string(bdps(b->type, b->lvl)) + " damage/s, range " + std::to_string((int)d.range), C_DIM, F_S);
+  if (isDone(*b) && b->type == B_MONASTERY) flowPara(f, "Relics kept: " + std::to_string(S.relicsHeld) + "  (+" + std::to_string((int)relicGoldPerMin()) + " gold/min). Monks bring relics here from the wild.", C_DIM, F_S);
   if (isDone(*b) && b->type == B_CASTLE) flowPara(f, "Garrison: " + std::to_string(2 + b->lvl) + " defenders (Long Swordsmen and Knights) sally out when raiders attack.", C_DIM, F_S);
   if (isDone(*b) && b->type == B_MARKET) {
     for (int k = 0; k < 4; k++) {
@@ -1093,13 +1313,15 @@ static void drawPanel() {
       flowNl(f);
     }
   }
-  if (isDone(*b) && (b->type == B_BLACKSMITH || b->type == B_UNIVERSITY)) {
+  bool hasTech = false; for (int k = 0; k < T_COUNT; k++) if (techdef(k).bld == b->type) hasTech = true;
+  if (isDone(*b) && hasTech) {
     if (S.researchTech >= 0) flowPara(f, std::string("Researching ") + techdef(S.researchTech).name + "... " + fmtTime(S.researchEnd - S.t), C_GOLD, F_S);
     for (int k = 0; k < T_COUNT; k++) {
       const TechDef& td = techdef(k); if (td.bld != b->type) continue;
       const char* blk = techBlock(k);
       std::string lbl = std::string(td.name) + " " + std::to_string(S.tech[k]) + "/" + std::to_string(td.maxLvl);
-      if (S.tech[k] < td.maxLvl) lbl += "  " + costStr(techCost(k)) + "  " + fmtTime(techTime(k));
+      if (td.maxLvl == 1) lbl = std::string(td.name) + (S.tech[k] ? "  - researched" : "  " + costStr(techCost(k)) + "  " + fmtTime(techTime(k)));
+      else if (S.tech[k] < td.maxLvl) lbl += "  " + costStr(techCost(k)) + "  " + fmtTime(techTime(k));
       if (flowBtn(f, lbl, blk ? 0 : 1, blk == nullptr && canAfford(techCost(k)))) startResearch(k);
       flowNl(f); flowPara(f, td.desc, C_DIM, F_S);
     }
@@ -1126,13 +1348,48 @@ static void drawExplorerPanel() {
   panelBox(x, y, w, hh, 0, 0.97f); block(x, y - U(40), w, hh + U(40));
   { float xs = U(28); if (uiButton(x + w - xs - U(8), y + U(8), xs, xs, "X", 2, true, F_M)) { explSel = -1; return; } }
   Flow f = flowAt(x + U(16), y + U(12), w - U(32));
-  flowTitle(f, e->vill ? "Villager explorer" : "Scout", C_TXT, F_M); f.y -= U(2);
+  flowTitle(f, e->vill ? "Villager explorer" : e->monk ? (e->carry ? "Monk carrying a relic" : "Monk") : "Scout", C_TXT, F_M); f.y -= U(2);
   flowPara(f, e->autoX ? "Exploring automatically..." : "Tap anywhere on the map to send them there. The fog lifts as they travel.", C_DIM, F_S);
   int id = e->id;
   if (flowBtn(f, e->autoX ? "Auto: ON" : "Auto-explore", e->autoX ? 1 : 0)) { if (Explorer* ep = findExplorer(id)) { ep->autoX = !ep->autoX; if (ep->autoX) ep->go = false; } }
   if (flowBtn(f, "Recall home", 2)) { recallExplorer(id); explSel = -1; }
 }
 
+static void drawEnemyPanel() {
+  if (enemySel < 0) return; Enemy* e = findEnemy(enemySel);
+  if (!e || modal != M_NONE || buildMode || view != V_HOME) { if (!e) enemySel = -1; return; }
+  float w = std::min(U(480), G.W - U(16)), x = (G.W - w) / 2, hh = U(168), y = G.H - U(94) - hh;
+  panelBox(x, y, w, hh, 0, 0.97f); block(x, y - U(40), w, hh + U(40));
+  { float xs = U(28); if (uiButton(x + w - xs - U(8), y + U(8), xs, xs, "X", 2, true, F_M)) { enemySel = -1; return; } }
+  Flow f = flowAt(x + U(16), y + U(12), w - U(60));
+  Base eb = enemyBaseAt(*e, e->seenTc, e->seenDead); int towers = 0; for (auto& sb : eb.buildings) if (sb.dps > 0 && !sb.trap) towers++; int diff = e->seenTc - tcLvl();
+  flowTitle(f, e->name + "  (" + LORD_COL_NAME[clampi(e->color, 0, NLORDCOL - 1)] + ")", mixc(LORD_COL[clampi(e->color, 0, NLORDCOL - 1)], 0xffffff, 0.3f), F_M); f.y -= U(2);
+  flowPara(f, std::string("Town Center Lv") + std::to_string(e->seenTc) + " (" + (diff == 0 ? "same as you" : diff > 0 ? std::to_string(diff) + " above you" : std::to_string(-diff) + " below you") + ")  -  " + PERSONALITY[e->pers] + "  -  " + stanceName(e->stance) + "  -  " + std::to_string(eb.buildings.size()) + " buildings, " + std::to_string(towers) + " defences" + (e->visNow ? "" : "  -  as last seen"), C_DIM, F_S);
+  flowCost(f, "Loot:", [&] { Cost c; for (int k = 0; k < NRES; k++) c.v[k] = (int)(eb.loot.v[k] * 0.2 * lootFactor(diff)); return c; }(), false);
+  f.x = f.x0; bool sneak = e->stance >= ST_PEACE;
+  if (flowBtn(f, sneak ? "Attack without warning" : "Attack", sneak ? 2 : 1, armyCount() > 0)) startEnemy(e->id);
+  if (flowBtn(f, "Talk", 0)) { diploEnemy = e->id; diploMsg.clear(); modal = M_DIPLO; modalScroll = 0; }
+  flowNl(f);
+  flowPara(f, armyCount() > 0 ? "Troops you send do not come home. Wipe the base out completely and the lord is gone for good." : "Train an army first.", C_DIM, F_S);
+}
+static void drawSquadPanel() {
+  if (sqSel < 0) return; Squad* q = findSquad(sqSel);
+  if (!q || modal != M_NONE || buildMode || view != V_HOME) { if (!q) sqSel = -1; return; }
+  float w = std::min(U(500), G.W - U(16)), x = (G.W - w) / 2, hh = U(176), y = G.H - U(94) - hh;
+  panelBox(x, y, w, hh, 0, 0.97f); block(x, y - U(40), w, hh + U(40));
+  { float xs = U(28); if (uiButton(x + w - xs - U(8), y + U(8), xs, xs, "X", 2, true, F_M)) { sqSel = -1; sqEscortPending = false; return; } }
+  Flow f = flowAt(x + U(16), y + U(12), w - U(60)); int id = q->id;
+  static const char* md[4] = {"standing by (tap the map to move)", "escorting", "guarding this ground", "marching on a rival lord"};
+  std::map<int, int> cnt; for (auto& u : q->u) cnt[u.type]++; std::string comp; for (auto& kv : cnt) comp += std::to_string(kv.second) + " " + udef(kv.first).tag + "  ";
+  flowTitle(f, "Squad - " + std::to_string(q->u.size()) + " troops", C_TXT, F_M); f.y -= U(2);
+  flowPara(f, comp + "  -  " + std::to_string((int)(squadHpFrac(*q) * 100)) + "% health  -  " + (q->recall ? "returning home" : md[clampi(q->mode, 0, 3)]), C_DIM, F_S);
+  if (sqEscortPending) flowPara(f, "Tap the villager, monk or scout to escort...", C_GOLD, F_S);
+  if (flowBtn(f, "Escort", 0, !S.expl.empty())) sqEscortPending = true;
+  if (flowBtn(f, "Guard here", 0)) squadGuard(id);
+  if (flowBtn(f, "Recall home", 2)) { squadRecall(id); sqSel = -1; }
+  flowNl(f);
+  int shown = 0; for (auto& e : S.enemies) if (e.seen && shown < 3) { shown++; if (flowBtn(f, std::string("Attack ") + e.name, 1)) { squadAttack(id, e.id); sqSel = -1; } }
+}
 static float lastStarsShown = 0;
 static void drawToasts() {
   if (toastT > 0) {
@@ -1189,7 +1446,7 @@ static void drawHud() {
       if (iconButton(mx - rw2 - U(12), by, rw2, bh, "icon_swords", "RAID", 2)) { modal = M_RAID; modalScroll = 0; }
     } else if (bmPaint) {
       float by = G.H - U(52) - pad, w = U(150);
-      std::string msg = std::string(bdef(bmType).name) + " " + std::to_string(buildCount(bmType)) + "/" + std::to_string(bmaxn(bmType, tcLvl())) + "  cost each " + costStr(bdef(bmType).cost) + (paintOn ? "  -  tap or drag to place" : "  -  drag to pan");
+      std::string msg = std::string(bdef(bmType).name) + " " + std::to_string(buildCountAt(bmType, false)) + "/" + std::to_string(bmaxn(bmType, tcLvl())) + (bmaxOut(bmType, tcLvl()) ? " (+outpost " + std::to_string(buildCountAt(bmType, true)) + "/" + std::to_string(bmaxOut(bmType, tcLvl())) + ")" : std::string()) + "  cost each " + costStr(bdef(bmType).cost) + (paintOn ? "  -  tap or drag to place" : "  -  drag to pan");
       float mw2 = G.textSize(msg, F_M).x + U(28); panelBox((G.W - mw2) / 2, by - U(46), mw2, U(36), 2, 1.f); G.text(msg, G.W / 2.f, by - U(40), F_M, C_TXT, A_CENTER);
       if (uiButton(G.W / 2 - w - pad / 2, by, w, U(48), "Done", 1)) { buildMode = false; bmPaint = false; saveGame(); }
       if (uiButton(G.W / 2 + pad / 2, by, w, U(48), paintOn ? "Switch to Pan" : "Switch to Paint")) paintOn = !paintOn;
@@ -1247,18 +1504,18 @@ static void paintAt(float sx, float sy) {
 }
 // tiles a raider can reach from outside the walls (flood fill from the map edge); used to stop deploying inside a fortress
 static bool reachableFromEdge(int tx, int ty) {
-  if (tx < 0 || ty < 0 || tx >= MAP || ty >= MAP) return true;                       // beyond the map edge is always open ground
-  static bool seen[MAP * MAP]; std::fill(seen, seen + MAP * MAP, false); std::vector<int> st;
-  auto push = [&](int x, int y) { if (x < 0 || y < 0 || x >= MAP || y >= MAP) return; int i = y * MAP + x; if (seen[i] || B.sim.wallIdx[i] >= 0) return; seen[i] = true; st.push_back(i); };
-  for (int i = 0; i < MAP; i++) { push(i, 0); push(i, MAP - 1); push(0, i); push(MAP - 1, i); }
-  while (!st.empty()) { int c = st.back(); st.pop_back(); int x = c % MAP, y = c / MAP; push(x + 1, y); push(x - 1, y); push(x, y + 1); push(x, y - 1); }
-  return tx >= 0 && ty >= 0 && tx < MAP && ty < MAP && seen[ty * MAP + tx];
+  if (tx < 0 || ty < 0 || tx >= SIMN || ty >= SIMN) return true;                       // beyond the map edge is always open ground
+  static bool seen[SIMN * SIMN]; std::fill(seen, seen + SIMN * SIMN, false); std::vector<int> st;
+  auto push = [&](int x, int y) { if (x < 0 || y < 0 || x >= SIMN || y >= SIMN) return; int i = y * SIMN + x; if (seen[i] || B.sim.wallIdx[i] >= 0) return; seen[i] = true; st.push_back(i); };
+  for (int i = 0; i < SIMN; i++) { push(i, 0); push(i, SIMN - 1); push(0, i); push(SIMN - 1, i); }
+  while (!st.empty()) { int c = st.back(); st.pop_back(); int x = c % SIMN, y = c / SIMN; push(x + 1, y); push(x - 1, y); push(x, y + 1); push(x, y - 1); }
+  return tx >= 0 && ty >= 0 && tx < SIMN && ty < SIMN && seen[ty * SIMN + tx];
 }
 static bool deployAt(float sx, float sy) {                         // deploy one unit of the selected type; false if nothing was deployed
   Pt g = toGrid(sx, sy);
   if (B.kind == K_DEFENCE || B.done || replaying) return false;
   if (S.army[B.sel] <= 0) { toast("No troops selected"); return false; }
-  if (g.x < -(float)DEP || g.y < -(float)DEP || g.x > MAP + (float)DEP || g.y > MAP + (float)DEP) return false;
+  if (g.x < -(float)DEP || g.y < -(float)DEP || g.x > SIMN + (float)DEP || g.y > SIMN + (float)DEP) return false;
   for (auto& b : B.sim.b) if (!b.dead && !b.wall && !b.trap && distRect(g.x, g.y, b) < 2.0f) { toast("Deploy farther from buildings"); return false; }
   if (!reachableFromEdge((int)g.x, (int)g.y)) { toast("Deploy outside the walls"); return false; }
   float jx = 0, jy = 0; if (holdDeploying) { jx = (frand() - .5f) * 0.9f; jy = (frand() - .5f) * 0.9f; }      // spread held-down troops a little
@@ -1270,13 +1527,24 @@ static void onTap(float sx, float sy) {
   Pt g = toGrid(sx, sy);
   if (view == V_BATTLE) { deployAt(sx, sy); return; }
   if (buildMode && bmPaint) return;
+  if (!buildMode) {
+    for (auto& q : S.squads) if (std::hypot(q.x - g.x, q.y - g.y) < 1.3f) { sqSel = q.id; explSel = -1; enemySel = -1; selId = -1; sqEscortPending = false; return; }
+    if (sqSel >= 0 && !findSquad(sqSel)) sqSel = -1;
+    if (sqSel >= 0) {
+      if (sqEscortPending) { sqEscortPending = false; for (auto& e : S.expl) if (std::hypot(e.x - g.x, e.y - g.y) < 1.5f) { squadEscort(sqSel, e.id); return; } toast("Escort cancelled"); return; }
+      orderSquad(sqSel, g.x, g.y); audioPlay(SFX_CLICK); return;
+    }
+  }
   if (!buildMode && explSel >= 0) {                                  // an explorer is selected: tap an explorer to switch, else send it there
     for (auto& e : S.expl) if (std::hypot(e.x - g.x, e.y - g.y) < 1.1f && e.id != explSel) { explSel = e.id; return; }
     orderExplorer(explSel, g.x, g.y); audioPlay(SFX_CLICK); return;
   }
-  if (!buildMode) for (auto& e : S.expl) if (std::hypot(e.x - g.x, e.y - g.y) < 1.1f) { explSel = e.id; selId = -1; return; }
+  if (!buildMode) for (auto& e : S.expl) if (std::hypot(e.x - g.x, e.y - g.y) < 1.1f) { explSel = e.id; selId = -1; sqSel = -1; return; }
   if (buildMode) { const BDef& d = bdef(bmType); bmx = roundi(g.x - d.w / 2.0); bmy = roundi(g.y - d.h / 2.0); return; }
-  for (auto& b : S.b) if (g.x >= b.x && g.x < b.x + b.w && g.y >= b.y && g.y < b.y + b.h) { selId = b.id; return; }
+  for (auto& b : S.b) if (g.x >= b.x && g.x < b.x + b.w && g.y >= b.y && g.y < b.y + b.h) { selId = b.id; enemySel = -1; return; }
+  for (auto& e : S.enemies) { int ox, oy; enemyOrigin(e, ox, oy); if (g.x < ox - 1 || g.y < oy - 1 || g.x > ox + MAP + 1 || g.y > oy + MAP + 1) continue;
+    if (!e.seen) continue;
+    for (auto& sb : enemyBaseAt(e, e.seenTc, e.seenDead).buildings) if (!sb.trap && g.x >= sb.x + ox && g.x < sb.x + ox + sb.w && g.y >= sb.y + oy && g.y < sb.y + oy + sb.h && isExplored((int)g.x, (int)g.y)) { enemySel = e.id; selId = -1; explSel = -1; return; } }
   for (auto& n : S.nodes) if (n.amt > 0 && nodeVisible(n) && g.x >= n.x && g.x < n.x + 1.2f && g.y >= n.y && g.y < n.y + 1.2f) {
     selId = -1; toast(std::string(n.type == N_TREE ? "Tree" : n.type == N_GOLD ? "Gold" : "Stone") + ": " + std::to_string((int)n.amt) + " left"); return;
   }
@@ -1288,7 +1556,7 @@ static void onTap(float sx, float sy) {
 
 // ============================================================ main
 static void boot() {
-  if (!loadGame()) newGame(); else topUpNodes();
+  if (!loadGame()) newGame(); else { rebalanceNodes(); topUpNodes(); }
   centerCamera();
   double away = std::max(0.0, std::min(28800.0, (double)((long long)std::time(nullptr) - S.lastSeen)));
   if (away > 10) {
@@ -1328,6 +1596,7 @@ static void updateWorld(float dt) {
   frameDt = dt;
   if (toastT > 0) toastT -= dt;
   if (bannerT > 0) bannerT -= dt;
+  if (modal != M_SETTINGS) armRestart = armAscend = false;
   { static Modal pm = M_NONE; if (modal != pm) { if (modal != M_NONE) { modalAnim = 0; modalAge = 0; } pm = modal; } if (modal != M_NONE) { modalAnim = std::min(1.f, modalAnim + dt * 7.f); modalAge += dt; } }
   { static View pv = V_HOME; if (view != pv) { fxClear(); pv = view; } }
   for (int i = 0; i < NRES; i++) { float d = S.res[i] - dispRes[i]; dispRes[i] += d * std::min(1.f, dt * 7.f); if (std::fabs(d) < 0.7f) dispRes[i] = S.res[i]; }
@@ -1339,10 +1608,11 @@ static void updateWorld(float dt) {
   { static Track cur = MUS_NONE; Track want = view == V_BATTLE ? MUS_BATTLE : MUS_VILLAGE; if (want != cur) { cur = want; audioMusic(want); } }
   if (view == V_HOME) {
     S.t += dt * speedMul; econTick(dt * speedMul); raidCheck();
+    if (modal == M_NONE) { int asq, aen; if (squadArrival(asq, aen)) { if (findEnemy(aen)) { startEnemy(aen); scout.fromSquad = asq; toast("Your squad stands at the gates!"); } } }
     if (modal == M_NONE && !incoming) { SeasonResult sr; if (seasonCheck(sr)) { seasonRes = sr; modal = M_SEASON; audioPlay(SFX_FANFARE); saveGame(); } }
     saveT += dt; if (saveT > 5) { saveT = 0; saveGame(); }
     if (!buildMode) bmMoveId = -1;
-    if (buildMode) bmOk = placeOk(bmType, bmx, bmy, bmMoveId);
+    if (buildMode) { const char* why = placeBlockReason(bmType, bmx, bmy, bmMoveId, true); bmOk = why == nullptr; bmWhy = why ? why : ""; }
     {   // ambient life: chimney smoke, camp fires, construction dust
       static const struct { BType t; float ox, oy, z, rate; int kind; int maxLvl; } CH[] = {{B_HOUSE, -0.42f, -0.45f, 62, 1.1f, FX_SMOKE, 99}, {B_TOWNHALL, -0.5f, -0.5f, 100, 1.3f, FX_SMOKE, 3}, {B_BARRACKS, -0.8f, -0.45f, 84, 1.0f, FX_SMOKE, 99},
                                                                                        {B_BLACKSMITH, -0.45f, -0.3f, 92, 1.8f, FX_SMOKE, 99}, {B_ARMYCAMP, 0.2f, 0.05f, 12, 7.f, FX_FLAME, 99}};
@@ -1387,7 +1657,7 @@ static void renderFrame() {
   cam.x -= shx; cam.y -= shy;
   blocks.clear();
   clickGate = modal == M_NONE; drawHud(); drawPanel();
-  drawExplorerPanel();
+  drawExplorerPanel(); drawEnemyPanel(); drawSquadPanel();
   clickGate = true; drawModal();
   if (in.released && !in.dragged && !in.uiGesture && !holdDone && modal == M_NONE && !inBlocks(blocks, in.mx, in.my)) onTap(in.mx, in.my);
   prevBlocks = blocks;
@@ -1427,6 +1697,7 @@ static int smoke() {
   auto shot = [&](const char* name) { keep = std::string("smoke_") + name + ".bmp"; shotPath = keep.c_str(); renderFrame(); LOG("shot %s", name); };
   int fails = 0;
   auto CHECK = [&](bool ok, const char* what) { LOG("%s: %s", ok ? "ok  " : "FAIL", what); if (!ok) fails++; };
+  CHECK(S.enemies.size() == 1 && S.enemies[0].tc == 1 && S.enemies[0].quad >= 1, "a rival lord starts at Town Center 1 in another quadrant");
   speedMul = 20;
   CHECK(smokePlace(B_LUMBER, 11, 6), "place lumber camp"); CHECK(smokePlace(B_FARM, 18, 17), "place farm"); CHECK(smokePlace(B_HOUSE, 18, 9), "place house");
   auto focus = [&](float gx, float gy, float zm) { cam.zoom = cam.zt = zm; cam.x = G.W / 2.f - (gx - gy) * TW / 2 * zm; cam.y = G.H / 2.f - (gx + gy) * TH / 2 * zm; cam.vx = cam.vy = 0; };
@@ -1446,6 +1717,7 @@ static int smoke() {
   for (int i = 0; i < 4000 && view == V_BATTLE && modal != M_ATK_RESULT; i++) frames(1);
   frames(14); shot("4_result"); CHECK(modal == M_ATK_RESULT, "attack finished"); CHECK(atk.win, "barbarian camp 1 beaten");
   { CHECK(!S.replays.empty() && S.replays[0].kind == 0 && !S.replays[0].deploys.empty(), "the attack was recorded as a replay"); int rs = -1, rpc = -1; replayRun(S.replays[0], rs, rpc); LOG("attack replay: live stars=%d pct=%d, replayed stars=%d pct=%d (%d deploys)", atk.stars, atk.pct, rs, rpc, (int)S.replays[0].deploys.size()); CHECK(rs == atk.stars && rpc == atk.pct, "replaying the attack reproduces it exactly"); }
+  { int used = 0; for (int i = 0; i < U_COUNT; i++) used += usedCount[i]; CHECK(used > 0 && armyCount() + used == army0, "deployed troops do not come back"); LOG("troops used %d, army now %d (was %d)", used, armyCount(), army0); }
   LOG("stars=%d pct=%d loot wood=%d renown=%d army0=%d", atk.stars, atk.pct, atk.got.v[0], S.renown, army0); CHECK(S.renown > 0, "renown increased"); goHome();
   findRival(true); shot("5_rival"); CHECK(modal == M_SCOUT && scout.rival, "rival scouted"); modal = M_NONE;
   tcB().lvl = 2; S.nextRaid = S.t; S.shieldUntil = 0; speedMul = 5; battleSpeed = 4;
@@ -1477,7 +1749,8 @@ static int smoke() {
   LOG("army: kn=%d ram=%d mg=%d monk=%d xb=%d ls=%d", S.army[U_KNIGHT], S.army[U_RAM], S.army[U_MANGONEL], S.army[U_MONK], S.army[U_CROSSBOW], S.army[U_LONGSWORD]);
   CHECK(S.army[U_KNIGHT] == 2 && S.army[U_RAM] == 1 && S.army[U_MANGONEL] == 1 && S.army[U_MONK] == 1 && S.army[U_CROSSBOW] == 1 && S.army[U_LONGSWORD] == 3, "Castle Age units trained");
   shot("10_castle_village");
-  findRival(true); CHECK(scout.rival && scout.tc >= 5, "rival is Castle Age"); int rivalBuildings = (int)scout.base.buildings.size();
+  for (int tries = 0; tries < 40; tries++) { findRival(true); if (scout.tc >= 5) break; }
+  CHECK(scout.rival && scout.tc >= 5, "rival is Castle Age"); int rivalBuildings = (int)scout.base.buildings.size();
   bool hasCastleOrKeep = false; for (auto& sb : scout.base.buildings) if (sb.type == B_KEEP || sb.type == B_CASTLE) hasCastleOrKeep = true;
   CHECK(hasCastleOrKeep, "rival base has keeps / castle"); LOG("rival tc=%d buildings=%d", scout.tc, rivalBuildings);
   beginBattle();
@@ -1635,23 +1908,154 @@ static int smoke() {
     // demolish
     { int before = (int)S.b.size(); S.res[WOOD] = 500; Bld& h = addB(B_HOUSE, 2, 24, 1); int id = h.id; CHECK(demolish(id) && (int)S.b.size() == before, "demolish removes a building"); CHECK(!demolish(tcB().id), "the Town Center cannot be demolished"); }
     { int total = 0, per[NRES]; for (int k = 0; k < NRES; k++) { per[k] = workersOn(k); total += per[k]; } LOG("workers per resource: wood %d food %d gold %d stone %d (assigned %d)", per[0], per[1], per[2], per[3], assigned()); CHECK(total == assigned(), "worker counts per resource add up to all assigned villagers"); }
+    // towers outrange archers; shields are long
+    { float tr = bdef(B_TOWER).range; bool ok = true; for (int i = 0; i < U_COUNT; i++) { const UDef& u = udef(i); if (u.ranged && !u.siege && u.range >= tr) ok = false; } CHECK(ok, "no archer-type unit outranges a Watch Tower");
+      Sim ts; ts.b.push_back(makeSimB(B_TOWER, 1, 15, 15)); ts.deploy(U_CROSSBOW, 15 + 2 + 6.0f, 16.f, false); float hp0 = ts.units[0].hp; ts.step(0.05f);
+      CHECK(ts.units[0].hp < hp0, "a tower hits a crossbowman before he can shoot it (6 tiles from its edge)");
+      Sim ts2; ts2.b.push_back(makeSimB(B_TOWER, 1, 15, 15)); ts2.deploy(U_ARBALEST, 15 + 2 + 6.1f, 16.f, false); float hp1 = ts2.units[0].hp; ts2.step(0.05f); CHECK(ts2.units[0].hp < hp1, "a tower also reaches an arbalester at its own range");
+      CHECK(shieldSeconds(1, 0) >= 600 && shieldSeconds(10, 0) >= 3 * 3600 && shieldSeconds(10, 3) >= 5 * 3600 && shieldSeconds(5, 2) > shieldSeconds(2, 2), "shields: 10+ minutes at Town Center 1, hours at the top");
+      LOG("shield: TC1 %s..%s, TC5 %s..%s, TC10 %s..%s", fmtTime(shieldSeconds(1, 0)).c_str(), fmtTime(shieldSeconds(1, 3)).c_str(), fmtTime(shieldSeconds(5, 0)).c_str(), fmtTime(shieldSeconds(5, 3)).c_str(), fmtTime(shieldSeconds(10, 0)).c_str(), fmtTime(shieldSeconds(10, 3)).c_str()); }
+    { int cnt = 0; bool ok = true; for (auto& n : S.nodes) if (n.type == N_TREE) { cnt++; if (n.max < 400) ok = false; } CHECK(cnt > 0 && ok, "every tree holds 400 wood"); }
+    // gathering upgrades, longer-lasting deposits
+    { int lv = tcB().lvl; int sv[T_COUNT]; for (int i = 0; i < T_COUNT; i++) sv[i] = S.tech[i]; double rt = S.researchEnd; int rtech = S.researchTech; S.researchTech = -1;
+      for (int i = T_WOOD1; i < T_COUNT; i++) S.tech[i] = 0;
+      CHECK(gatherMul(WOOD) == 1.f && gatherMul(FOOD) == 1.f, "no bonus before any research");
+      tcB().lvl = 2; CHECK(techBlock(T_WOOD1) != nullptr && std::strstr(techBlock(T_WOOD1), "Feudal") != nullptr, "Double-Bit Axe waits for the Feudal Age");
+      tcB().lvl = 3; Bld* lc = nullptr; for (auto& b : S.b) if (b.type == B_LUMBER && isDone(b)) lc = &b; int lcid = -1; if (!lc) { lc = &addB(B_LUMBER, 1, 1, 1); lcid = lc->id; }
+      CHECK(techBlock(T_WOOD2) != nullptr, "Bone Saw needs the Castle Age and the Axe"); tcB().lvl = 5; CHECK(techBlock(T_WOOD2) != nullptr && std::strstr(techBlock(T_WOOD2), "previous") != nullptr, "Bone Saw needs Double-Bit Axe first");
+      tcB().lvl = 3; for (int k = 0; k < NRES; k++) S.res[k] = 5000; float w0 = S.res[WOOD]; startResearch(T_WOOD1); CHECK(S.researchTech == T_WOOD1 && S.res[WOOD] == w0 - 200, "research starts at the camp and costs resources"); for (int i = 0; i < 700; i++) { S.t += 0.1; econTick(0.1f); }
+      CHECK(S.tech[T_WOOD1] == 1 && std::fabs(gatherMul(WOOD) - 1.25f) < 1e-4f, "Double-Bit Axe gives +25% wood");
+      tcB().lvl = 5; S.res[GOLD] = 5000; startResearch(T_WOOD2); for (int i = 0; i < 900; i++) { S.t += 0.1; econTick(0.1f); } tcB().lvl = 8; startResearch(T_WOOD3); for (int i = 0; i < 1300; i++) { S.t += 0.1; econTick(0.1f); }
+      CHECK(S.tech[T_WOOD3] == 1 && std::fabs(gatherMul(WOOD) - 1.75f) < 1e-4f, "three woodcutting upgrades give +75% wood");
+      if (lcid >= 0) demolish(lcid);
+      int nodeOk = 0; for (auto& n : S.nodes) if (n.type == N_GOLD && n.max >= 1000) nodeOk++; CHECK(nodeOk > 0, "gold deposits hold 1000 or more");
+      CHECK(techdef(T_FARM1).bld == B_MILL && techdef(T_GOLD1).bld == B_GOLDCAMP && techdef(T_STONE3).bld == B_STONECAMP, "upgrades are researched at the matching camp or mill");
+      for (int i = 0; i < T_COUNT; i++) S.tech[i] = sv[i]; S.researchEnd = rt; S.researchTech = rtech; tcB().lvl = lv; }
     // balance: villager cost, dark-age economy, raid strength and variation, level matchmaking
-    { int v0 = S.villagers; S.villagers = 3; Cost c3 = villagerCost(); S.villagers = 40; Cost c40 = villagerCost(); S.villagers = v0; LOG("villager cost: 3 -> %dF, 40 -> %dF %dW", c3.v[FOOD], c40.v[FOOD], c40.v[WOOD]); CHECK(c3.v[FOOD] >= 50 && c40.v[FOOD] > c3.v[FOOD] * 5 && c40.v[WOOD] > 0, "villagers get much dearer as you have more");
+    { int v0 = S.villagers; S.villagers = 3; Cost c3 = villagerCost(); S.villagers = 40; Cost c40 = villagerCost(); S.villagers = v0; LOG("villager cost: 3 -> %dF, 40 -> %dF %dW", c3.v[FOOD], c40.v[FOOD], c40.v[WOOD]); CHECK(c3.v[FOOD] >= 50 && c40.v[FOOD] > c3.v[FOOD] * 5 && c40.v[WOOD] == 0 && c3.v[WOOD] == 0, "villagers get much dearer as you have more, and cost only food");
       int lv = tcB().lvl; tcB().lvl = 2; CHECK(canBuildErr(B_GOLDCAMP) != nullptr && canBuildErr(B_STONECAMP) != nullptr, "no gold or stone camps in the Dark Age"); Node gn{5, 5, N_GOLD, 1, 1, 0}; Node tn{5, 5, N_TREE, 1, 1, 0}; CHECK(!nodeVisible(gn) && nodeVisible(tn), "gold deposits are hidden until Feudal");
       CHECK(tcup(3).cost.v[GOLD] == 0 && tcup(3).cost.v[STONE] == 0 && udef(U_MILITIA).cost.v[GOLD] == 0, "the Dark Age needs no gold or stone"); tcB().lvl = 3; CHECK(canBuildErr(B_GOLDCAMP) == nullptr || std::strcmp(canBuildErr(B_GOLDCAMP), "Locked") != 0, "gold camps unlock at Feudal (TC3)");
-      tcB().lvl = 5; int t0 = 0; for (auto& n : S.nodes) if (n.type == N_TREE && n.x >= 0 && n.y >= 0 && n.x < MAP && n.y < MAP) t0++; topUpNodes(); int t1 = 0; for (auto& n : S.nodes) if (n.type == N_TREE && n.x >= 0 && n.y >= 0 && n.x < MAP && n.y < MAP) t1++; LOG("home trees %d -> %d after top-up at TC5", t0, t1); CHECK(t1 >= std::min(t0, 88) && t1 >= 40, "the village keeps plenty of forest as it grows"); tcB().lvl = lv; }
-    { double sumLo = 0, sumHi = 0; int mn = 999, mx = 0; int dmin = 9, dmax = -9; int sr = S.renown; double saveT = S.t; int lv = tcB().lvl; tcB().lvl = 6;
+      tcB().lvl = 5; int t0 = 0; for (auto& n : S.nodes) if (n.type == N_TREE && inHome(n.x + .5f, n.y + .5f)) t0++; topUpNodes(); int t1 = 0; for (auto& n : S.nodes) if (n.type == N_TREE && inHome(n.x + .5f, n.y + .5f)) t1++; LOG("home trees %d -> %d after top-up at TC5", t0, t1); CHECK(t1 >= std::min(t0, 88) && t1 >= 40, "the village keeps plenty of forest as it grows"); tcB().lvl = lv; }
+    { double sumLo = 0, sumHi = 0; int mn = 999, mx = 0; int dmin = 9, dmax = -9; int sr = S.renown; double saveT = S.t; int lv = tcB().lvl; tcB().lvl = 6; auto savedEn = S.enemies; S.enemies.clear();      // with no rival lord alive, raiders are random ladder lords of +-2 levels
       for (int i = 0; i < 60; i++) { S.t = saveT + i * 37.0; S.renown = 0; Sim s0 = makeDefenceSim(); S.renown = 4500; Sim s1 = makeDefenceSim(); sumLo += s0.sq.size(); sumHi += s1.sq.size(); mn = std::min(mn, (int)s0.sq.size()); mx = std::max(mx, (int)s0.sq.size()); dmin = std::min(dmin, s0.atkDiff); dmax = std::max(dmax, s0.atkDiff); }
-      S.t = saveT; S.renown = sr; tcB().lvl = lv; LOG("raid size at renown 0: avg %.1f (min %d max %d); at 4500: avg %.1f; attacker level diff %d..%d", sumLo / 60, mn, mx, sumHi / 60, dmin, dmax);
+      S.t = saveT; S.renown = sr; tcB().lvl = lv; S.enemies = savedEn; LOG("raid size at renown 0: avg %.1f (min %d max %d); at 4500: avg %.1f; attacker level diff %d..%d", sumLo / 60, mn, mx, sumHi / 60, dmin, dmax);
       CHECK(sumHi > sumLo * 1.6, "raids grow with your Renown"); CHECK(mx >= mn * 2 && dmin <= -1 && dmax >= 1, "raids vary a lot in size and attacker level");
       CHECK(winFactor(2) > winFactor(0) && winFactor(0) > winFactor(-2) && loseFactor(-2) > loseFactor(0) && loseFactor(0) > loseFactor(2) && lootFactor(2) > lootFactor(-2), "Renown and loot depend on the relative Town Center level");
       int sd = 0; for (int i = 0; i < 40; i++) { findRival(true); sd = std::max(sd, std::abs(scout.tc - tcLvl())); modal = M_NONE; } CHECK(sd <= 2, "rivals are always within two Town Center levels"); }
+    // resource camp look
+    { int ids[3] = {-1, -1, -1}; BType ty[3] = {B_LUMBER, B_GOLDCAMP, B_STONECAMP}; int ox, oy; int base[3][2] = {{3, 24}, {7, 24}, {11, 24}}; int tcl = tcB().lvl; tcB().lvl = 3;
+      for (int i = 0; i < 3; i++) if (nearSpot(ty[i], base[i][0], base[i][1], ox, oy)) { Bld& nb = addB(ty[i], ox, oy, 1); nb.workers = i; ids[i] = nb.id; }
+      S.villagers += 6; { float gx = 8.f, gy = 25.f, zm = 1.7f; cam.zoom = cam.zt = zm; cam.x = G.W / 2.f - (gx - gy) * TW / 2 * zm; cam.y = G.H / 2.f - (gx + gy) * TH / 2 * zm; cam.vx = cam.vy = 0; } frames(6); shot("45_camps");
+      for (int i = 0; i < 3; i++) if (ids[i] >= 0) demolish(ids[i]); tcB().lvl = tcl; centerCamera(); }
+    // quadrants, village growth, outpost limits, rival lords
+    { CHECK(S.enemies.size() >= 1, "a rival lord exists on the map"); CHECK(S.enemies[0].quad >= 1 && S.enemies[0].quad <= 3, "the rival lives in another quadrant");
+      int lv = tcB().lvl; tcB().lvl = 1; CHECK(homeG() == 0 && !inHome(-1.5f, 15.f), "the village starts at 30x30"); tcB().lvl = 3; CHECK(homeG() == 2 && inHome(-1.5f, 15.f) && inHome(31.f, 15.f), "the village grows a little at Town Center 3"); tcB().lvl = 9; CHECK(homeG() == 8, "and again every two levels (8 tiles at TC9)");
+      int ox, oy; enemyOrigin(S.enemies[0], ox, oy); revealAround(50.f, 5.f, 4.f); revealAround((float)ox + 15.f, (float)oy + 15.f, 3.f);
+      tcB().lvl = 3; const char* w3 = placeBlockReason(B_TOWER, 50, 5); CHECK(w3 != nullptr && std::strstr(w3, "Lv4") != nullptr, "no building outside your quadrant before Town Center 4");
+      tcB().lvl = 5; int fx = -99, fy = -99; for (int yy = -8; yy < 40 && fx < -90; yy += 2) for (int xx = 47; xx < 58; xx++) if (isExplored(xx, yy) && isExplored(xx + 1, yy + 1) && placeBlockReason(B_TOWER, xx, yy) == nullptr) { fx = xx; fy = yy; break; }
+      if (fx < -90) { revealAround(52.f, 20.f, 14.f); for (int yy = 8; yy < 32 && fx < -90; yy++) for (int xx = 47; xx < 58; xx++) if (placeBlockReason(B_TOWER, xx, yy) == nullptr) { fx = xx; fy = yy; break; } }
+      CHECK(fx > -90, "from Town Center 4 you can build in the other quadrants"); const char* wh = placeBlockReason(B_TOWER, ox + 15, oy + 15); CHECK(wh != nullptr && std::strstr(wh, "home base") != nullptr, "but never inside another lord's home base");
+      tcB().lvl = 3; int houses0 = buildCountAt(B_HOUSE, true); addB(B_HOUSE, -9, -9, 1); CHECK(placeBlockReason(B_BARRACKS, -12, -12, -1, true) != nullptr, "military buildings cannot be built outside the village");
+      CHECK(buildCountAt(B_HOUSE, true) == houses0 + 1, "outpost buildings are counted separately"); int lim = bmaxOut(B_HOUSE, 3); for (int i = buildCountAt(B_HOUSE, true); i < lim; i++) addB(B_HOUSE, -14, -14 + i * 3, 1);
+      revealAround(15.f, 33.f, 14.f); int hx2 = -99, hy2 = -99; for (int yy = 18; yy < 40 && hx2 < -90; yy++) for (int xx = -12; xx < 40; xx++) if (!inHome(xx + 1.f, yy + 1.f) && placeBlockReason(B_HOUSE, xx, yy) == nullptr) { hx2 = xx; hy2 = yy; break; }
+      const char* over = hx2 > -90 ? placeBlockReason(B_HOUSE, hx2, hy2, -1, true) : nullptr; CHECK(over != nullptr && std::strstr(over, "limit") != nullptr, "outposts have their own limit per building type");
+      { std::vector<int> rm; for (auto& b : S.b) if (b.type == B_HOUSE && !inHome(b.x + 1.f, b.y + 1.f)) rm.push_back(b.id); for (int id : rm) demolish(id); }
+      tcB().lvl = lv;
+      Enemy* e0 = &S.enemies[0]; int eid = e0->id; startEnemy(eid); CHECK(modal == M_SCOUT && scout.enemyId == eid && !scout.base.buildings.empty(), "tapping a rival lord opens the attack screen"); S.army[U_MILITIA] += 5; beginBattle();
+      int defs = 0; for (auto& u : B.sim.units) if (u.def) defs++; CHECK(defs >= 2, "the rival lord defends himself with troops"); LOG("rival lord %s TC%d: %d defenders, %d buildings", e0->name.c_str(), e0->tc, defs, (int)scout.base.buildings.size());
+      size_t nb0 = scout.base.buildings.size(); for (size_t i = 0; i < 2 && i < B.sim.b.size(); i++) B.sim.b[i].dead = true; B.sim.over = true; finishAttack(); e0 = findEnemy(eid);
+      CHECK(e0 != nullptr && e0->dead.size() >= 2 && enemyBase(*e0).buildings.size() <= nb0 - 2, "buildings you destroy stay destroyed"); goHome();
+      startEnemy(eid); beginBattle(); for (auto& sb : B.sim.b) sb.dead = true; B.sim.over = true; size_t en0 = S.enemies.size(); finishAttack(); CHECK(S.enemies.size() == en0 - 1 && findEnemy(eid) == nullptr, "a lord who is wiped out is gone from the map"); goHome();
+      int spawned = 0; for (int i = 0; i < 80 && !spawned; i++) { S.enemyCheck = S.t - 1; econTick(0.1f); if (!S.enemies.empty()) spawned = 1; } CHECK(spawned, "a new lord eventually settles the empty quadrant"); LOG("respawned lord: TC%d at quadrant %d", S.enemies.empty() ? 0 : S.enemies[0].tc, S.enemies.empty() ? -1 : S.enemies[0].quad);
+      { Enemy only = S.enemies[0]; S.enemies.clear(); only.stance = ST_WAR; S.enemies.push_back(only); }
+      int fromEnemy = 0; for (int i = 0; i < 40; i++) { S.t += 37; Sim sm = makeDefenceSim(); if (sm.atkEnemy >= 0 && !S.enemies.empty() && sm.atkName == S.enemies[0].name && sm.atkTc == S.enemies[0].tc) fromEnemy++; } LOG("raids from the rival: %d of 40", fromEnemy); CHECK(fromEnemy > 20, "raids on your village come from the rival lord");
+      saveGame(); Enemy sv = S.enemies[0]; S.enemies.clear(); bool lg = loadGame(); LOG("load: %d, enemies %d name '%s' vs '%s' seed %u vs %u tc %d vs %d", (int)lg, (int)S.enemies.size(), S.enemies.empty() ? "" : S.enemies[0].name.c_str(), sv.name.c_str(), S.enemies.empty() ? 0u : S.enemies[0].seed, sv.seed, S.enemies.empty() ? 0 : S.enemies[0].tc, sv.tc); CHECK(lg && S.enemies.size() >= 1 && S.enemies[0].name == sv.name && S.enemies[0].seed == sv.seed && S.enemies[0].tc == sv.tc, "rival lords are saved");
+      { std::ifstream sf("smoke_save.txt", std::ios::binary); std::string txt((std::istreambuf_iterator<char>(sf)), std::istreambuf_iterator<char>()); sf.close();
+        size_t rp = txt.find("RPL "); size_t cut = rp == std::string::npos ? std::string::npos : txt.rfind('\n', txt.rfind('\n', rp) - 1);
+        CHECK(txt.compare(0, 5, "DOK12") == 0 && cut != std::string::npos, "the save is the current version");
+        if (cut != std::string::npos) { std::string old = "DOK6" + txt.substr(5, cut + 1 - 5); std::ofstream of("smoke_old.txt", std::ios::binary | std::ios::trunc); of << old; of.close(); std::string keep = g_savePath; g_savePath = "smoke_old.txt";
+          bool okOld = loadGame(); g_savePath = keep; CHECK(okOld && S.enemies.size() >= 1 && S.replays.empty() && S.fog.size() == (size_t)WORLD * WORLD, "a save from before the four quadrants loads and gets a rival lord"); } }
+      Pt c0 = iso(15.f, 15.f); (void)c0;
+      { auto focus4 = [&](float gx, float gy, float zm) { cam.zoom = cam.zt = zm; cam.x = G.W / 2.f - (gx - gy) * TW / 2 * zm; cam.y = G.H / 2.f - (gx + gy) * TH / 2 * zm; cam.vx = cam.vy = 0; };
+        Enemy& e1 = S.enemies[0]; e1.seen = true; e1.seenTc = e1.tc; e1.seenDead = e1.dead.size(); int px, py; enemyOrigin(e1, px, py); revealAround(px + 15.f, py + 15.f, 20.f); enemySel = e1.id; focus4(px + 15.f, py + 15.f, 0.8f); frames(8); shot("46_rival_base"); enemySel = -1; modal = M_RAID; modalScroll = 0; frames(14); shot("47_raid_menu_lords"); modal = M_NONE; centerCamera(); }
+    }
+    // fog of war memory, diplomacy, relics
+    { Enemy* e = &S.enemies[0]; int eid = e->id; int ox, oy; enemyOrigin(*e, ox, oy);
+      e->seen = false; e->seenTc = 0; econTick(0.1f); CHECK(!findEnemy(eid)->seen, "a lord nobody has looked at is not on your map");
+      revealAround(50.f, 5.f, 4.f); econTick(0.1f); CHECK(isExplored(50, 5) && !isVisible(50, 5), "explored land outside your quadrant is not live without a unit or building there");
+      CHECK(isVisible(10, 10) && isVisible(-1, 15), "your own quadrant is always visible");
+      { Explorer ex{}; ex.id = S.aid++; ex.x = ex.tx = 50.f; ex.y = ex.ty = 5.f; S.expl.push_back(ex); econTick(0.1f); CHECK(isVisible(50, 5), "a unit gives you sight of its surroundings"); S.expl.pop_back(); }
+      { Explorer ex{}; ex.id = S.aid++; ex.x = ex.tx = ox + 15.f; ex.y = ex.ty = oy + 15.f; S.expl.push_back(ex); econTick(0.1f); e = findEnemy(eid); CHECK(e->seen && e->visNow && e->seenTc == e->tc, "a scout at his gates finds the lord"); S.expl.pop_back(); }
+      int tcWas = e->tc; e->tc = std::min(MAXTC, e->tc + 1); econTick(0.1f); e = findEnemy(eid); CHECK(e->seenTc == tcWas || tcWas == MAXTC, "you only know what you last saw of his base"); e->tc = tcWas; e->seenTc = tcWas;
+      // diplomacy
+      e->pers = 2; e->trust = 5; S.betrayals = 0; e->stance = ST_WAR; e->talkAt = 0; CHECK(diploChance(*e, DP_PEACE) > 0.7f && diploChance(*e, DP_PEACE) <= 0.95f, "diplomacy odds are sensible");
+      std::string msg; for (int i = 0; i < 40 && e->stance < ST_PEACE; i++) { S.t += 300; diploPropose(eid, DP_PEACE, msg); } CHECK(e->stance == ST_PEACE, "a Merchant lord accepts peace");
+      { int lvB = tcB().lvl; tcB().lvl = 5; Bld& mk = addB(B_MARKET, 3, 3, 1); int mkid = mk.id; CHECK(tradeRoutesAllowed() >= 2, "a Market supports trade routes");
+        for (int i = 0; i < 40 && e->stance < ST_TRADE; i++) { S.t += 300; diploPropose(eid, DP_TRADE, msg); } CHECK(e->stance == ST_TRADE && tradeRoutesActive() == 1, "a trade route opens");
+        S.res[GOLD] = 0; for (int i = 0; i < 600; i++) { S.t += 0.1; econTick(0.1f); } LOG("trade route: %.0f gold in a minute", S.res[GOLD]); CHECK(S.res[GOLD] > 20, "the trade route pays gold");
+        for (int i = 0; i < 60 && e->stance < ST_ALLY; i++) { S.t += 300; diploPropose(eid, DP_ALLY, msg); } CHECK(e->stance == ST_ALLY, "an alliance can be agreed");
+        { int allyUnits = 0; for (int i = 0; i < 5; i++) { S.t += 41; Sim sm = makeDefenceSim(); for (auto& u : sm.units) if (u.def) allyUnits++; CHECK(sm.atkEnemy != eid, "an ally never raids you"); } e->stance = ST_PEACE; int peaceUnits = 0; for (int i = 0; i < 5; i++) { S.t += 41; Sim sm = makeDefenceSim(); for (auto& u : sm.units) if (u.def) peaceUnits++; } e->stance = ST_ALLY; CHECK(allyUnits > peaceUnits, "allies send troops to defend your village"); }
+        S.betrayals = 0; startEnemy(eid); CHECK(scout.sneak, "attacking an ally is a sneak attack"); S.army[U_MILITIA] += 3; beginBattle(); e = findEnemy(eid); CHECK(e->stance == ST_WAR && S.betrayals == 2, "a treacherous attack ends the alliance and costs you trust"); goHome(); CHECK(diploChance(*e, DP_PEACE) < 0.7f, "betrayal makes every lord less willing to deal"); S.betrayals = 0;
+        demolish(mkid); tcB().lvl = lvB; }
+      e->stance = ST_WAR; e->pers = 1; e->trust = 0; }
+    { Bld& mon = addB(B_MONASTERY, 3, 6, 1); int mid = mon.id; S.relics.push_back({S.aid++, 9.5f, 9.5f}); size_t nr0 = S.relics.size(); int held0 = S.relicsHeld; S.army[U_MONK] = 2; S.res[GOLD] = 100;
+      CHECK(nr0 >= 8, "relics lie scattered across the world"); CHECK(sendMonk() && S.army[U_MONK] == 1, "a monk can be sent out"); int moid = S.expl.back().id; orderExplorer(moid, 9.5f, 9.5f);
+      for (int i = 0; i < 700; i++) { S.t += 0.1; econTick(0.1f); } CHECK(S.relicsHeld == held0 + 1 && S.relics.size() == nr0 - 1 && S.army[U_MONK] == 2 && findExplorer(moid) == nullptr, "a monk fetches a relic and brings it to the monastery");
+      float g0 = S.res[GOLD]; for (int i = 0; i < 600; i++) { S.t += 0.1; econTick(0.1f); } CHECK(relicGoldPerMin() > 0 && S.res[GOLD] > g0 + 5, "relics generate gold over time"); LOG("relics held %d: +%.0f gold/min", S.relicsHeld, relicGoldPerMin());
+      S.relicsHeld = held0; demolish(mid); S.army[U_MONK] = 0; }
+    // wild animals, field squads, escorts, marching on a lord
+    { auto savedA = S.animals; int mil0 = S.army[U_MILITIA]; S.animals.clear(); S.expl.clear();
+      auto wolf = [&](float x, float y) { Animal w{}; w.id = S.aid++; w.type = A_WOLF; w.x = w.hx = w.tx = x; w.y = w.hy = w.ty = y; w.food = w.maxFood = 90; w.hp = w.maxHp = 80; w.alive = true; S.animals.push_back(w); };
+      wolf(70.f, 40.f); S.army[U_MONK] = 1; sendMonk(); { Explorer& m = S.expl.back(); m.x = m.tx = 70.8f; m.y = m.ty = 40.f; m.go = false; } int mid = S.expl.back().id;
+      for (int i = 0; i < 100; i++) { S.t += 0.1; econTick(0.1f); } Explorer* me = findExplorer(mid);
+      CHECK(me == nullptr || me->hp < me->maxHp, "wild animals attack a monk who wanders into them"); S.expl.clear(); S.army[U_MONK] = 0;
+      { S.animals.clear(); S.army[U_MILITIA] = 8; int cn[U_COUNT] = {}; cn[U_MILITIA] = 6; float f0 = S.res[FOOD]; S.res[FOOD] = 0; CHECK(formSquad(cn) && S.army[U_MILITIA] == 2 && S.squads.size() == 1, "a squad is formed from the army"); CHECK(fieldPop() == 6, "troops in the field still use housing");
+        Squad& q = S.squads.back(); q.x = q.tx = 70.5f; q.y = q.ty = 40.f; int sid = q.id; wolf(72.f, 40.f);
+        for (int i = 0; i < 120; i++) { S.t += 0.1; econTick(0.1f); } Squad* sq = findSquad(sid);
+        CHECK(!S.animals[0].alive && sq && sq->u.size() >= 3 && S.res[FOOD] > 5, "a squad kills a wolf and brings home the meat"); S.res[FOOD] = f0;
+        // escort
+        sq->x = sq->tx = 70.f; sq->y = sq->ty = 40.f; S.expl.clear(); S.scoutStock = 1; sendExplorer(false); Explorer& sc = S.expl.back(); int scid = sc.id; sc.x = 71.f; sc.y = 40.f; orderExplorer(scid, 86.f, 40.f); squadEscort(sid, scid);
+        for (int i = 0; i < 90; i++) { S.t += 0.1; econTick(0.1f); } sq = findSquad(sid); Explorer* sce = findExplorer(scid);
+        CHECK(sq && sce && std::hypot(sq->x - sce->x, sq->y - sce->y) < 4.f && sq->x > 74.f, "an escorting squad follows its charge"); S.expl.clear(); S.scoutStock = 0;
+        // march on a lord
+        S.enemies[0].seen = true; S.enemies[0].seenTc = S.enemies[0].tc; int eid2 = S.enemies[0].id; sq->x = sq->tx = 40.f; sq->y = sq->ty = 20.f; squadAttack(sid, eid2); int asq = -1, aen = -1; bool arrived = false;
+        for (int i = 0; i < 6000 && !arrived; i++) { S.t += 0.1; econTick(0.1f); arrived = squadArrival(asq, aen); } CHECK(arrived && asq == sid && aen == eid2, "a squad marching on a lord reaches his gates");
+        sq = findSquad(sid); size_t un = sq ? sq->u.size() : 0; startEnemy(eid2); scout.fromSquad = sid; int home0 = S.army[U_MILITIA]; beginBattle();
+        CHECK(squadBattle && (size_t)S.army[U_MILITIA] == un && findSquad(sid) == nullptr, "the squad at the gates becomes the army for the battle");
+        for (auto& sb : B.sim.b) sb.dead = true; B.sim.over = true; finishAttack(); CHECK((size_t)S.army[U_MILITIA] == (size_t)home0 + un && !squadBattle, "troops held back return to the army afterwards"); goHome();
+        // recall + save
+        { int cn2[U_COUNT] = {}; cn2[U_MILITIA] = 2; formSquad(cn2); int id2 = S.squads.back().id; saveGame(); S.squads.clear(); CHECK(loadGame() && findSquad(id2) != nullptr && findSquad(id2)->u.size() == 2, "squads are saved");
+          Squad* q2 = findSquad(id2); q2->x = q2->tx = 30.f; q2->y = q2->ty = 30.f; int milBefore = S.army[U_MILITIA]; squadRecall(id2); for (int i = 0; i < 1500 && findSquad(id2); i++) { S.t += 0.1; econTick(0.1f); } CHECK(findSquad(id2) == nullptr && S.army[U_MILITIA] == milBefore + 2, "a recalled squad rejoins the army"); }
+        { int cn3[U_COUNT] = {}; cn3[U_MILITIA] = 3; S.army[U_MILITIA] += 3; formSquad(cn3); Squad& q3 = S.squads.back(); sqSel = q3.id; float gx = q3.x, gy = q3.y, zm = 2.0f; cam.zoom = cam.zt = zm; cam.x = G.W / 2.f - (gx - gy) * TW / 2 * zm; cam.y = G.H / 2.f - (gx + gy) * TH / 2 * zm; cam.vx = cam.vy = 0; frames(6); shot("52_squad"); S.squads.clear(); sqSel = -1; centerCamera(); } }
+      S.animals = savedA; S.army[U_MILITIA] = mil0; S.squads.clear(); }
+    // lord colours and total ruin
+    { for (int i = 0; i < 400 && S.enemies.empty(); i++) { S.enemyCheck = S.t - 1; econTick(0.1f); } CHECK(!S.enemies.empty(), "a new lord settles after one is wiped out"); std::vector<int> cols; for (auto& e : S.enemies) cols.push_back(e.color); bool uniq = true; for (size_t i = 0; i < cols.size(); i++) for (size_t j = i + 1; j < cols.size(); j++) if (cols[i] == cols[j]) uniq = false; CHECK(uniq && S.enemies[0].color >= 0 && S.enemies[0].color < NLORDCOL, "every living lord has his own colour");
+      int c0 = S.enemies[0].color, id0 = S.enemies[0].id; saveGame(); S.enemies[0].color = (c0 + 1) % NLORDCOL; { bool lgc = loadGame(); LOG("colour reload: ok=%d enemy=%d color=%d want=%d n=%d", (int)lgc, findEnemy(id0) ? 1 : 0, findEnemy(id0) ? findEnemy(id0)->color : -1, c0, (int)S.enemies.size()); CHECK(lgc && findEnemy(id0) && findEnemy(id0)->color == c0, "a lord keeps his colour across save and load"); }
+      bool seenAll[NLORDCOL] = {}; for (int i = 0; i < 60; i++) { Enemy tmp; (void)tmp; } setEnemyTeamColor(LORD_COL[4]); setEnemyTeamColor(LORD_COL[0]); CHECK(true, "the enemy team can be recoloured");
+      // total ruin by a neighbouring lord
+      int lvR = tcB().lvl; for (int k = 0; k < NRES; k++) S.res[k] = 8000.f; addB(B_TOWER, -13, -13, 1); { Bld& o1 = addB(B_LUMBER, -12, 10, 1); o1.workers = 2; } int vil0 = S.villagers; S.villagers = std::max(S.villagers, 40);
+      int cn[U_COUNT] = {}; cn[U_MILITIA] = 2; S.army[U_MILITIA] += 2; formSquad(cn); S.squads.back().x = S.squads.back().tx = 50.f; S.squads.back().y = S.squads.back().ty = 50.f; int out0 = outsideBuildings(); CHECK(out0 >= 2, "outposts exist before the ruin");
+      Sim ruin; ruin.defence = true; ruin.atkEnemy = id0; ruin.atkName = "Test"; ruin.b.push_back(makeSimB(B_TOWNHALL, 3, 20, 20)); for (auto& sb : ruin.b) sb.dead = true; float w0 = S.res[WOOD]; Report rr = applyDefence(ruin);
+      LOG("ruin: ruined=%d stolen wood %d of %.0f outside=%d squads=%d lostB=%d", (int)rr.ruined, rr.stolen.v[WOOD], w0, outsideBuildings(), (int)S.squads.size(), rr.lostB); CHECK(rr.ruined && rr.stolen.v[WOOD] > (int)(w0 * 0.5f) && outsideBuildings() == 0 && S.squads.empty() && rr.lostB >= 2, "being razed by a lord costs most of your stores and everything outside the safe zone");
+      CHECK(buildCountAt(B_TOWNHALL, false) == 1 && S.b.size() >= 3, "but the village itself is kept"); Sim part; part.defence = true; part.atkEnemy = id0; part.b.push_back(makeSimB(B_TOWNHALL, 3, 20, 20)); part.b.push_back(makeSimB(B_HOUSE, 1, 25, 25)); part.b[0].dead = true;
+      addB(B_TOWER, -13, -13, 1); Report rp2 = applyDefence(part); CHECK(!rp2.ruined && outsideBuildings() == 1, "a partial defeat does not trigger the ruin"); { std::vector<int> rm; for (auto& b : S.b) if (!inHome(b.x + b.w / 2.f, b.y + b.h / 2.f)) rm.push_back(b.id); for (int id : rm) demolish(id); }
+      S.villagers = vil0; tcB().lvl = lvR; (void)seenAll; }
+    // army presets
+    { Bld& c1 = addB(B_ARMYCAMP, 1, 1, 1); int cid1 = c1.id; Bld& c2 = addB(B_ARMYCAMP, 4, 1, 1); int cid2 = c2.id; for (int k = 0; k < NRES; k++) S.res[k] = std::min((float)cap(), 5000.f);
+      for (int i = 0; i < U_COUNT; i++) S.presets[0][i] = 0; S.presets[0][U_MILITIA] = 3; S.presets[0][U_ARCHER] = 2;
+      int q0 = queuedPop(); float r0[NRES]; for (int k = 0; k < NRES; k++) r0[k] = S.res[k]; Cost want = presetCost(S.presets[0]); queuePreset(0);
+      CHECK(queuedPop() == q0 + 5, "a preset queues all of its units"); bool same = true; for (int k = 0; k < NRES; k++) if (std::fabs(r0[k] - S.res[k] - want.v[k]) > 0.5f) same = false;
+      CHECK(same && want.v[FOOD] == 3 * udef(U_MILITIA).cost.v[FOOD] + 2 * udef(U_ARCHER).cost.v[FOOD], "a preset costs exactly the sum of its units");
+      for (auto& b : S.b) b.q.clear(); S.res[FOOD] = 50; S.res[WOOD] = 5000; S.res[GOLD] = 5000; queuePreset(0); CHECK(queuedPop() == 1, "a preset trains as many units as you can afford");
+      for (auto& b : S.b) b.q.clear(); demolish(cid1); demolish(cid2); for (int i = 0; i < U_COUNT; i++) S.presets[0][i] = 0; S.presets[1][U_MILITIA] = 4; S.presets[1][U_KNIGHT] = 1; saveGame(); int pm = S.presets[1][U_MILITIA]; S.presets[1][U_MILITIA] = 0; CHECK(loadGame() && S.presets[1][U_MILITIA] == pm && S.presets[1][U_KNIGHT] == 1, "presets are saved"); S.presets[1][U_MILITIA] = 0; S.presets[1][U_KNIGHT] = 0;
+      modal = M_ARMY; modalScroll = 0; frames(14); shot("43_army_presets"); presetEdit = 1; modal = M_PRESET; frames(14); shot("44_preset_edit"); modal = M_NONE; }
     // rotating the view and moving buildings
     { for (int r = 0; r < 4; r++) { setViewAngle(r * 1.5707963f); Pt p = iso(10.f, 22.f); Pt gg = toGrid(p.x, p.y); CHECK(std::fabs(gg.x - 10.f) < 0.01f && std::fabs(gg.y - 22.f) < 0.01f, "screen <-> grid round-trips in every rotation"); }
       setViewAngle(0); vTarget = 0;
       Bld* mv = nullptr; for (auto& b : S.b) if (b.type == B_HOUSE && isDone(b)) { mv = &b; break; }
       CHECK(mv != nullptr, "a finished house exists"); if (mv) { int id = mv->id; int ox = mv->x, oy = mv->y; S.res[WOOD] = 1000; int nx = ox, ny = oy; bool spot = false; for (int r = 1; r < 14 && !spot; r++) for (int dx = -r; dx <= r && !spot; dx++) for (int dy = -r; dy <= r && !spot; dy++) if (placeOk(B_HOUSE, ox + dx, oy + dy, id) && (ox + dx != ox || oy + dy != oy)) { nx = ox + dx; ny = oy + dy; spot = true; }
         float w0 = S.res[WOOD]; CHECK(spot && moveBuilding(id, nx, ny) && findB(id)->x == nx && findB(id)->y == ny && S.res[WOOD] < w0, "a finished building can be moved for a fee"); CHECK(!moveBuilding(tcB().id, nx, ny), "the Town Center cannot be moved"); moveBuilding(id, ox, oy); } }
+    S.animals.erase(std::remove_if(S.animals.begin(), S.animals.end(), [](const Animal& an) { return an.type != A_DEER; }), S.animals.end());      // keep the scouting tests free of dangerous wildlife
     // fog of war + scouts
     CHECK(isExplored(15, 15) && !isExplored(-10, -10) && !isExplored(40, 40), "start area explored, far land hidden");
     CHECK(!placeOk(B_TOWER, -10, -10), "cannot build in the fog");
@@ -1664,18 +2068,18 @@ static int smoke() {
     // treasure
     { Chest c{-8, -8, mkc(0, 0, 200, 0), false}; S.chests.push_back(c); S.res[GOLD] = 100; orderExplorer(sid, -7.5f, -7.5f); for (int i = 0; i < 120; i++) econTick(0.1f); CHECK(S.chests.back().taken && S.res[GOLD] >= 290, "a scout picks up treasure"); }
     // auto explore pushes the frontier outwards
-    { int e0 = 0; for (int y = -WEXT; y < MAP + WEXT; y++) for (int x = -WEXT; x < MAP + WEXT; x++) if (isExplored(x, y)) e0++;
-      findExplorer(sid)->autoX = true; for (int i = 0; i < 2500; i++) econTick(0.1f); int e1 = 0; for (int y = -WEXT; y < MAP + WEXT; y++) for (int x = -WEXT; x < MAP + WEXT; x++) if (isExplored(x, y)) e1++;
+    { int e0 = 0; for (int y = -WEXT; y < WHI; y++) for (int x = -WEXT; x < WHI; x++) if (isExplored(x, y)) e0++;
+      findExplorer(sid)->autoX = true; for (int i = 0; i < 2500; i++) econTick(0.1f); int e1 = 0; for (int y = -WEXT; y < WHI; y++) for (int x = -WEXT; x < WHI; x++) if (isExplored(x, y)) e1++;
       LOG("auto-explore: %d -> %d explored tiles of %d", e0, e1, WORLD * WORLD); CHECK(e1 > e0 + 400, "auto-explore uncovers a lot of land"); }
     // villager explorer + recall
     { S.villagers += 1; int iv = idleV(); CHECK(sendExplorer(true) && idleV() == iv - 1, "a sent villager is no longer idle"); int vid = S.expl.back().id; recallExplorer(vid); for (int i = 0; i < 300; i++) econTick(0.1f); CHECK(findExplorer(vid) == nullptr && idleV() == iv, "a recalled villager returns home"); recallExplorer(sid); for (int i = 0; i < 400; i++) econTick(0.1f); CHECK(findExplorer(sid) == nullptr && S.scoutStock >= 1, "a recalled scout returns to the stock"); }
     // hunting with a Mill
     { Animal* an = nullptr; for (auto& a : S.animals) if (a.alive && a.type == A_DEER) { an = &a; break; }
       CHECK(an != nullptr, "deer exist"); if (an) { revealAround(an->x, an->y, 7); int mx = (int)std::floor(an->x) - 1, my = (int)std::floor(an->y) - 1; for (auto& n : S.nodes) if (n.x >= mx - 1 && n.x <= mx + 2 && n.y >= my - 1 && n.y <= my + 2) n.amt = 0, n.respawn = 1e9;
-        S.villagers += 3; Bld& mill = addB(B_MILL, mx, my, 1); mill.workers = 2; int mid = mill.id; float f0 = S.res[FOOD], an0 = an->food; S.res[FOOD] = 0; f0 = 0;
-        for (int i = 0; i < 300; i++) econTick(0.1f); Bld* mb = findB(mid); CHECK(S.res[FOOD] > 5 && an->food < an0, "hunters bring food to the Mill"); LOG("hunting: food %.0f, deer food %.0f -> %.0f, mill status %d", S.res[FOOD], an0, an->food, mb ? mb->status : -1); demolish(mid); } }
+        S.villagers += 3; Bld& mill = addB(B_MILL, mx, my, 1); mill.workers = 2; int mid = mill.id; float f0 = S.res[FOOD], an0 = 0; std::vector<int> hids; for (auto& q : S.animals) if (q.alive && std::hypot(q.x - (mx + 1.f), q.y - (my + 1.f)) <= 9.f) { an0 += q.food; hids.push_back(q.id); } S.res[FOOD] = 0; f0 = 0;
+        for (int i = 0; i < 300; i++) econTick(0.1f); Bld* mb = findB(mid); float an1 = 0; for (auto& q : S.animals) if (std::find(hids.begin(), hids.end(), q.id) != hids.end() && q.alive) an1 += q.food; CHECK(S.res[FOOD] > 5 && an1 < an0, "hunters bring food to the Mill"); LOG("hunting: food %.0f, deer food %.0f -> %.0f, mill status %d", S.res[FOOD], an0, an->food, mb ? mb->status : -1); demolish(mid); } }
     // outposts
-    { int tx = -9, ty = -9; bool ok = false; for (int r = 0; r < 8 && !ok; r++) for (int dx = -r; dx <= r && !ok; dx++) for (int dy = -r; dy <= r && !ok; dy++) if (placeOk(B_HOUSE, tx + dx, ty + dy)) { addB(B_HOUSE, tx + dx, ty + dy, 1); addB(B_FARM, tx + dx + 3, ty + dy, 1); ok = true; }
+    { int tx = -12, ty = -12; bool ok = false; for (int r = 0; r < 8 && !ok; r++) for (int dx = -r; dx <= r && !ok; dx++) for (int dy = -r; dy <= r && !ok; dy++) if (placeOk(B_HOUSE, tx + dx, ty + dy)) { addB(B_HOUSE, tx + dx, ty + dy, 1); addB(B_FARM, tx + dx + 3, ty + dy, 1); ok = true; }
       CHECK(ok && outsideBuildings() >= 1, "buildings placed outside the village"); int before = outsideBuildings(); int vill0 = S.villagers; OutpostReport rp = outpostRaid();
       LOG("outpost raid: any=%d lost=%d held=%d villagers lost=%d", (int)rp.any, rp.lostB, rp.held, rp.lostV); CHECK(rp.any && outsideBuildings() == before - rp.lostB && S.villagers == vill0 - rp.lostV, "outpost raid removes what it destroys for good");
       (void)vill0; }
@@ -1708,12 +2112,27 @@ static int smoke() {
     CHECK((int)S.replays.size() <= 10, "at most 10 replays are kept"); for (int i = 0; i < 12; i++) headlessRaid(); CHECK((int)S.replays.size() == 10, "the replay list is capped at 10");
     int n0 = (int)S.replays.size(); int s0 = S.replays[3].stars, p0 = S.replays[3].pct; size_t d0 = S.replays[0].deploys.size(); saveGame(); S.replays.clear(); CHECK(loadGame() && (int)S.replays.size() == n0, "replays survive save/load"); int rs2 = -1, rp2 = -1; replayRun(S.replays[3], rs2, rp2); CHECK(rs2 == s0 && rp2 == p0 && S.replays[0].deploys.size() == d0, "a replay loaded from the save plays back identically");
     startReplay(0); frames(40); CHECK(replaying && view == V_BATTLE && RP.step > 20, "the replay viewer plays"); shot("41_replay"); modal = M_NONE; replaying = false; goHome(); modal = M_REPLAYS; frames(14); shot("42_replay_list"); modal = M_NONE; }
+  { diploEnemy = S.enemies[0].id; diploMsg = "Lord X considers your offer..."; modal = M_DIPLO; frames(10); shot("50_diplomacy"); modal = M_NONE;
+    S.relics.push_back({S.aid++, 6.5f, 20.5f}); { float gx = 6.5f, gy = 20.5f, zm = 2.0f; cam.zoom = cam.zt = zm; cam.x = G.W / 2.f - (gx - gy) * TW / 2 * zm; cam.y = G.H / 2.f - (gx + gy) * TH / 2 * zm; cam.vx = cam.vy = 0; } frames(6); shot("51_relic"); centerCamera(); }
+  {   // restart and prestige
+    S.meta.points = 3; int pr0 = S.meta.prestige; tcB().lvl = MAXTC; CHECK(prestigeAvailable(), "prestige opens at the maximum Town Center"); tcB().lvl = 5; CHECK(!prestigeAvailable(), "and not before");
+    restartGame(true); CHECK(S.meta.prestige == pr0 + 1 && S.meta.points == 4 && tcLvl() == 1 && S.enemies.size() == 1 && S.enemies[0].tc == 1 && !S.seenIntro && modal == M_INTRO, "ascending starts a new realm and keeps prestige");
+    CHECK(prestigeBuy(0) && prestigeHas(0) && S.meta.points == 3 && !prestigeBuy(0), "points buy a permanent unlock"); int q0 = S.enemies[0].quad;
+    restartGame(false); CHECK(S.meta.prestige == pr0 + 1 && prestigeHas(0) && tcLvl() == 1 && S.enemies.size() == 1 && S.b.size() == 3, "a plain restart keeps prestige but resets everything else"); LOG("restart: rival quadrant %d -> %d", q0, S.enemies[0].quad);
+    modal = M_PRESTIGE; frames(10); shot("48_prestige"); modal = M_SETTINGS; frames(10); shot("49_options"); modal = M_NONE;
+  }
   LOG("SMOKE %s (%d failures)", fails ? "FAILED" : "PASSED", fails); if (smokeLog) std::fclose(smokeLog); return fails ? 2 : 0;
 }
 
 int main(int argc, char** argv) {
   std::srand((unsigned)std::time(nullptr));
   if (!G.init()) return 1;
+#ifndef __ANDROID__
+  { char* bp = SDL_GetBasePath(); std::string ip = std::string(bp ? bp : "") + "assets/icon.png"; if (bp) SDL_free(bp); size_t isz = 0; void* idata = SDL_LoadFile(ip.c_str(), &isz);
+    if (idata) { int iw, ih, ic; unsigned char* ipx = stbi_load_from_memory((const unsigned char*)idata, (int)isz, &iw, &ih, &ic, 4);
+      if (ipx) { SDL_Surface* isf = SDL_CreateRGBSurfaceFrom(ipx, iw, ih, 32, iw * 4, 0x000000ff, 0x0000ff00, 0x00ff0000, 0xff000000); if (isf) { SDL_SetWindowIcon(G.win, isf); SDL_FreeSurface(isf); } stbi_image_free(ipx); }
+      SDL_free(idata); } }
+#endif
   loadSprites();
   audioInit();
   for (int i = 1; i + 1 < argc; i++) if (std::string(argv[i]) == "--export-audio") { int n = audioExportWav(argv[i + 1]); std::fprintf(stderr, "exported %d audio files\n", n); audioShutdown(); G.shutdown(); return n > 0 ? 0 : 1; }

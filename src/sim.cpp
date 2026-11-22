@@ -39,24 +39,24 @@ static void moveToward(SimUnit& u, float tx, float ty, float speed, float dt) {
 // A* over the 30x30 tile grid. Standing wall/gate tiles are passable but expensive, so raiders walk through gaps
 // when the detour is short and otherwise breach the wall in their way.
 bool Sim::findPath(const SimUnit& u, const SimB& tgt, float reach, std::vector<int>& out) const {
-  const int N = MAP * MAP; const float WALLC = 30.f;
-  static float g[MAP * MAP]; static int parent[MAP * MAP]; static char closed[MAP * MAP];
+  const int N = SIMN * SIMN; const float WALLC = 30.f;
+  static float g[SIMN * SIMN]; static int parent[SIMN * SIMN]; static char closed[SIMN * SIMN];
   for (int i = 0; i < N; i++) { g[i] = 1e9f; parent[i] = -1; closed[i] = 0; }
-  int sx = clampi((int)u.x, 0, MAP - 1), sy = clampi((int)u.y, 0, MAP - 1), start = sy * MAP + sx;
+  int sx = clampi((int)u.x, 0, SIMN - 1), sy = clampi((int)u.y, 0, SIMN - 1), start = sy * SIMN + sx;
   float tcx = tgt.x + tgt.w / 2.f, tcy = tgt.y + tgt.h / 2.f;
-  auto heur = [&](int i) { return std::max(0.f, std::hypot((i % MAP) + .5f - tcx, (i / MAP) + .5f - tcy) - tgt.w / 2.f - reach); };
+  auto heur = [&](int i) { return std::max(0.f, std::hypot((i % SIMN) + .5f - tcx, (i / SIMN) + .5f - tcy) - tgt.w / 2.f - reach); };
   typedef std::pair<float, int> QI; std::priority_queue<QI, std::vector<QI>, std::greater<QI>> pq;
   g[start] = 0; pq.push({heur(start), start});
   static const int DX[8] = {1, -1, 0, 0, 1, 1, -1, -1}, DY[8] = {0, 0, 1, -1, 1, -1, 1, -1};
   int goal = -1;
   while (!pq.empty()) {
     int cur = pq.top().second; pq.pop(); if (closed[cur]) continue; closed[cur] = 1;
-    int cx = cur % MAP, cy = cur / MAP;
+    int cx = cur % SIMN, cy = cur / SIMN;
     if (distRect(cx + .5f, cy + .5f, tgt) <= reach) { goal = cur; break; }
     for (int k = 0; k < 8; k++) {
-      int nx = cx + DX[k], ny = cy + DY[k]; if (nx < 0 || ny < 0 || nx >= MAP || ny >= MAP) continue;
-      int ni = ny * MAP + nx; if (closed[ni]) continue;
-      if (k >= 4 && (wallIdx[cy * MAP + nx] >= 0 || wallIdx[ny * MAP + cx] >= 0)) continue;     // no corner cutting through walls
+      int nx = cx + DX[k], ny = cy + DY[k]; if (nx < 0 || ny < 0 || nx >= SIMN || ny >= SIMN) continue;
+      int ni = ny * SIMN + nx; if (closed[ni]) continue;
+      if (k >= 4 && (wallIdx[cy * SIMN + nx] >= 0 || wallIdx[ny * SIMN + cx] >= 0)) continue;     // no corner cutting through walls
       float cost = (k < 4 ? 1.f : 1.414f) + (wallIdx[ni] >= 0 ? WALLC : 0.f);
       if (g[cur] + cost < g[ni]) { g[ni] = g[cur] + cost; parent[ni] = cur; pq.push({g[ni] + heur(ni), ni}); }
     }
@@ -74,7 +74,7 @@ void Sim::step(float dt) {
   // wall grid
   {
     std::fill(wallIdx.begin(), wallIdx.end(), -1); int walls = 0;
-    for (int i = 0; i < (int)b.size(); i++) if (b[i].wall && !b[i].dead) { int x = (int)b[i].x, y = (int)b[i].y; if (x >= 0 && y >= 0 && x < MAP && y < MAP) { wallIdx[y * MAP + x] = i; walls++; } }
+    for (int i = 0; i < (int)b.size(); i++) if (b[i].wall && !b[i].dead) { int x = (int)b[i].x, y = (int)b[i].y; if (x >= 0 && y >= 0 && x < SIMN && y < SIMN) { wallIdx[y * SIMN + x] = i; walls++; } }
     if (walls != lastWalls) { gridVer++; lastWalls = walls; }
   }
   while (!sq.empty() && sq.front().t <= t) { Spawn s = sq.front(); sq.erase(sq.begin()); deploy(s.type, s.x, s.y, false); }
@@ -172,7 +172,7 @@ void Sim::step(float dt) {
       moveToward(u, clampf(u.x, tb->x, tb->x + tb->w), clampf(u.y, tb->y, tb->y + tb->h), d.speed, dt);
       continue;
     }
-    int wi = u.path[u.pidx]; float wx = (wi % MAP) + .5f, wy = (wi / MAP) + .5f;
+    int wi = u.path[u.pidx]; float wx = (wi % SIMN) + .5f, wy = (wi / SIMN) + .5f;
     if (wallIdx[wi] >= 0) {
       SimB& w = b[wallIdx[wi]];
       if (distRect(u.x, u.y, w) <= std::max(d.range, 0.85f)) { u.dx = wx - u.x; u.dy = wy - u.y; strike(u, d, m, w); }
@@ -188,7 +188,7 @@ void Sim::step(float dt) {
     if (bd.dead || bd.trap || bd.wall || bd.dps <= 0) continue;
     bd.cd -= dt; if (bd.cd > 0) continue;
     float cx = bd.x + bd.w / 2, cy = bd.y + bd.h / 2; int best = -1; float bdist = bd.range;
-    for (int i = 0; i < (int)units.size(); i++) if (!units[i].def && units[i].hp > 0) { float dd = std::hypot(units[i].x - cx, units[i].y - cy); if (dd <= bdist) { bdist = dd; best = i; } }
+    for (int i = 0; i < (int)units.size(); i++) if (!units[i].def && units[i].hp > 0) { float dd = distRect(units[i].x, units[i].y, bd); if (dd <= bdist) { bdist = dd; best = i; } }      // range is measured from the building's edge, like the raiders' own ranges
     if (best >= 0 && bd.type == B_SCORPION) {
       // piercing bolt: hits every raider within 0.4 tiles of the line from the scorpion through the target (to +2 tiles beyond)
       float tx = units[best].x - cx, ty = units[best].y - cy, tl = std::max(0.01f, std::hypot(tx, ty)); float ux = tx / tl, uy = ty / tl, reachL = std::min(bd.range + 1.5f, tl + 2.0f);

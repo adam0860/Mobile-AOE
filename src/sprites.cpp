@@ -48,6 +48,24 @@ static void swapTeam(unsigned char* px, int w, int h) {
     if (p[3] > 8 && b > 55 && b > r * 1.45f && b > g * 1.2f) { p[0] = (unsigned char)std::min(255, (int)(b * 1.02f)); p[1] = (unsigned char)(g * 0.5f); p[2] = (unsigned char)std::min(255, (int)(r * 0.8f + g * 0.1f)); }
   }
 }
+static std::vector<std::pair<int, std::string>> unitFiles;       // unit atlas pages (index, file) so the enemy team can be recoloured later
+static void swapTeamColor(unsigned char* px, int w, int h, uint32_t rgb) {
+  float tr = (float)((rgb >> 16) & 255), tg = (float)((rgb >> 8) & 255), tb = (float)(rgb & 255);
+  for (size_t i = 0, n = (size_t)w * h; i < n; i++) {
+    unsigned char* p = px + i * 4; int r = p[0], g = p[1], b = p[2];
+    if (p[3] > 8 && b > 55 && b > r * 1.45f && b > g * 1.2f) { float lum = b / 255.f; p[0] = (unsigned char)std::min(255.f, tr * lum + 0.45f * g); p[1] = (unsigned char)std::min(255.f, tg * lum + 0.45f * g); p[2] = (unsigned char)std::min(255.f, tb * lum + 0.45f * g); }
+  }
+}
+void setEnemyTeamColor(uint32_t rgb) {
+  for (auto& uf : unitFiles) {
+    size_t n = 0; void* data = SDL_LoadFile(assetPath(uf.second).c_str(), &n); if (!data) continue;
+    int w, h, c; unsigned char* px = stbi_load_from_memory((const unsigned char*)data, (int)n, &w, &h, &c, 4); SDL_free(data); if (!px) continue;
+    swapTeamColor(px, w, h, rgb); int ridx = uf.first + 1000; if (ridx >= (int)pages.size() || !pages[ridx].t[0]) { stbi_image_free(px); continue; }
+    Page& rp = pages[ridx]; SDL_UpdateTexture(rp.t[0], nullptr, px, w * 4);
+    int hw, hh; auto half = halve(px, w, h, hw, hh); if (rp.t[1]) SDL_UpdateTexture(rp.t[1], nullptr, half.data(), hw * 4);
+    stbi_image_free(px);
+  }
+}
 static bool loadPage(int idx, const std::string& file, bool units) {
   size_t n = 0; void* data = SDL_LoadFile(assetPath(file).c_str(), &n);
   if (!data) { std::fprintf(stderr, "missing asset %s\n", file.c_str()); return false; }
@@ -57,6 +75,7 @@ static bool loadPage(int idx, const std::string& file, bool units) {
   Page& pg = pages[idx]; pg.t[0] = makeTex(px, w, h); pg.w[0] = w; pg.h[0] = h;
   int hw, hh; auto half = halve(px, w, h, hw, hh);
   pg.t[1] = makeTex(half.data(), hw, hh); pg.w[1] = hw; pg.h[1] = hh;
+  if (units) unitFiles.push_back({idx, file});
   if (units) {                                                // red variant lives on a second page index
     swapTeam(px, w, h);
     int ridx = idx + 1000; if ((int)pages.size() <= ridx) pages.resize(ridx + 1);
@@ -103,11 +122,15 @@ static SDL_Rect srcRect(const SpriteDef& s, int lod) {
   return {s.x / 2, s.y / 2, std::max(1, s.w / 2), std::max(1, s.h / 2)};
 }
 
+static Uint8 tintR = 255, tintG = 255, tintB = 255;
+void setSpriteTint(uint32_t rgb) { tintR = (rgb >> 16) & 255; tintG = (rgb >> 8) & 255; tintB = rgb & 255; }
 void drawSprite(const SpriteDef& s, float sx, float sy, float zoom, float alpha, float scaleMul) {
   LodPick lp = pick(s, zoom, scaleMul); SDL_Rect src = srcRect(s, lp.lod); float k = lp.k;
   SDL_FRect dst{sx - s.ax * k, sy - s.ay * k, s.w * k, s.h * k};
   SDL_SetTextureAlphaMod(lp.t, (Uint8)(clampf(alpha, 0, 1) * 255));
+  SDL_SetTextureColorMod(lp.t, tintR, tintG, tintB);
   SDL_RenderCopyF(G.r, lp.t, &src, &dst);
+  if (tintR != 255 || tintG != 255 || tintB != 255) SDL_SetTextureColorMod(lp.t, 255, 255, 255);
 }
 
 void drawSpriteSway(const SpriteDef& s, float sx, float sy, float zoom, float amp, float phase, float scaleMul, float alpha) {

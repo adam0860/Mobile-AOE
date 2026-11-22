@@ -456,9 +456,10 @@ exec(open(os.path.join(HERE, 'models_nature.py'), encoding='utf-8').read(), glob
 exec(open(os.path.join(HERE, 'models_units_v3.py'), encoding='utf-8').read(), globals())
 exec(open(os.path.join(HERE, 'models_icons.py'), encoding='utf-8').read(), globals())
 exec(open(os.path.join(HERE, 'models_explore.py'), encoding='utf-8').read(), globals())
+exec(open(os.path.join(HERE, 'models_camps.py'), encoding='utf-8').read(), globals())
 
 import zlib
-NODECOR = ('deer', 'boar', 'wolf', 'chest', 'wall_', 'gate_', 'spike', 'oil', 'wallrubble', 'oak', 'pine', 'palm', 'node_', 'bush', 'tuft', 'rock', 'flower', 'rubble', 'scaffold', 'stump', 'decor', 'ground', 'farm')
+NODECOR = ('relic', 'lumber', 'goldcamp', 'stonecamp', 'deer', 'boar', 'wolf', 'chest', 'wall_', 'gate_', 'spike', 'oil', 'wallrubble', 'oak', 'pine', 'palm', 'node_', 'bush', 'tuft', 'rock', 'flower', 'rubble', 'scaffold', 'stump', 'decor', 'ground', 'farm')
 def do_building(name, fw, fh, up, fn, *a):
     if not should(name):
         return
@@ -500,9 +501,9 @@ def do_unit_all():
 JOBS = []
 for st in (0, 1, 2):
     do_building('house_%d' % st, 2, 2, 1.8, m_house, st)
-    do_building('lumber_%d' % st, 2, 2, 1.3, m_lumber, st)
-    do_building('goldcamp_%d' % st, 2, 2, 1.3, m_mine, st, 'gold')
-    do_building('stonecamp_%d' % st, 2, 2, 1.3, m_mine, st, 'stone')
+    do_building('lumber_%d' % st, 2, 2, 1.9, m_lumber, st)
+    do_building('goldcamp_%d' % st, 2, 2, 1.5, m_mine, st, 'gold')
+    do_building('stonecamp_%d' % st, 2, 2, 1.5, m_mine, st, 'stone')
     do_building('farm_%d' % st, 2, 2, 0.8, m_farm, st)
     do_building('barracks_%d' % st, 3, 3, 2.1, m_barracks, st)
     do_building('armycamp_%d' % st, 3, 3, 1.6, m_armycamp, st)
@@ -533,9 +534,9 @@ def do_imperial(name, fw, fh, up, fn, *a):
         for k, v in saved.items():
             M[k] = v
 do_imperial('house_3', 2, 2, 1.8, m_house, 3)
-do_imperial('lumber_3', 2, 2, 1.3, m_lumber, 3)
-do_imperial('goldcamp_3', 2, 2, 1.3, m_mine, 3, 'gold')
-do_imperial('stonecamp_3', 2, 2, 1.3, m_mine, 3, 'stone')
+do_imperial('lumber_3', 2, 2, 1.9, m_lumber, 3)
+do_imperial('goldcamp_3', 2, 2, 1.5, m_mine, 3, 'gold')
+do_imperial('stonecamp_3', 2, 2, 1.5, m_mine, 3, 'stone')
 do_imperial('farm_3', 2, 2, 0.8, m_farm, 3)
 do_imperial('barracks_3', 3, 3, 2.1, m_barracks, 3)
 do_imperial('archery_3', 3, 3, 1.7, m_archery, 3)
@@ -557,6 +558,7 @@ for _an in ('deer', 'boar', 'wolf'):
             m_animal(_an, _k)
             render('%s_%d' % (_an, _k), W_, H_, oy_)
 do_building('chest_0', 1, 1, 0.7, m_chest)
+do_building('relic_0', 1, 1, 1.0, m_relic)
 do_building('tent_0', 2, 2, 1.4, m_tent)
 do_building('chief_0', 3, 3, 2.4, m_chief)
 for n in (2, 3, 4):
