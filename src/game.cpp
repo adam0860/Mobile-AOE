@@ -244,10 +244,11 @@ static void animalSpot(Animal& a) {
 }
 static void computeVisibility();
 static int g_arrSquad = -1, g_arrEnemy = -1;
+static float villHp() { return S.meta.boon == BOON_HARDY ? 110.f : 30.f; }
 static void worldTick(float dt) {
   double t = S.t;
   for (auto& a : S.animals) {
-    if (!a.alive) { if (t >= a.respawn) { animalSpot(a); a.food = a.maxFood; a.alive = true; } continue; }
+    if (!a.alive) { if (t >= a.respawn) { animalSpot(a); a.food = a.maxFood; a.hp = a.maxHp; a.alive = true; } continue; }
     float sp = a.type == A_DEER ? 1.0f : a.type == A_BOAR ? 0.8f : 1.1f; a.chasing = false;
     if (a.type != A_DEER) {                                       // wolves and boars attack any of your units that come near: explorers, villagers, monks, scouts, squads
       float aggro = a.type == A_WOLF ? 4.5f : 2.5f, best = aggro; Explorer* te = nullptr; Squad* ts = nullptr; float tx = 0, ty = 0;
@@ -255,7 +256,7 @@ static void worldTick(float dt) {
       for (auto& sq : S.squads) { float d = std::hypot(sq.x - a.x, sq.y - a.y); if (d < best) { best = d; ts = &sq; te = nullptr; tx = sq.x; ty = sq.y; } }
       if ((te || ts) && std::hypot(a.hx - tx, a.hy - ty) < 11.f) {
         a.chasing = true; a.tx = tx; a.ty = ty; sp = a.type == A_WOLF ? 2.4f : 2.0f;
-        if (best < 1.0f) { float dmg = (a.type == A_WOLF ? 7.f : 11.f) * dt; if (te) { if (te->maxHp <= 0) te->maxHp = te->hp = te->vill ? 30.f : te->monk ? 45.f : 70.f; te->hp -= dmg; te->hurt = 2.5f; } else { float rest = dmg; while (rest > 0 && !ts->u.empty()) { SqUnit& f0 = ts->u.front(); if (f0.hp > rest) { f0.hp -= rest; rest = 0; } else { rest -= f0.hp; ts->u.erase(ts->u.begin()); } } ts->fight = 1.f; } }
+        if (best < 1.0f) { float dmg = (a.type == A_WOLF ? 7.f : 11.f) * dt; if (te) { if (te->maxHp <= 0) te->maxHp = te->hp = te->vill ? villHp() : te->monk ? 45.f : 70.f; te->hp -= dmg; te->hurt = 2.5f; if (te->vill && S.meta.boon == BOON_HARDY) { a.hp -= 20.f * dt; if (a.hp <= 0) { a.alive = false; a.chasing = false; a.respawn = t + 240; a.food = 0; toast(std::string("Your villager killed the ") + (a.type == A_WOLF ? "wolf" : "boar") + "!"); sfx(3); } } } else { float rest = dmg; while (rest > 0 && !ts->u.empty()) { SqUnit& f0 = ts->u.front(); if (f0.hp > rest) { f0.hp -= rest; rest = 0; } else { rest -= f0.hp; ts->u.erase(ts->u.begin()); } } ts->fight = 1.f; } }
       }
     }
     float dx = a.tx - a.x, dy = a.ty - a.y, L = std::hypot(dx, dy);
@@ -300,8 +301,8 @@ static void worldTick(float dt) {
     for (auto& c : S.chests) if (!c.taken && std::hypot(c.x + .5f - e.x, c.y + .5f - e.y) < 1.1f) {
       c.taken = true; for (int k = 0; k < NRES; k++) S.res[k] = std::min((float)cap(), S.res[k] + c.c.v[k]); toast("Treasure found!"); sfx(3);
     }
-    if (e.maxHp <= 0) e.maxHp = e.hp = e.vill ? 30.f : e.monk ? 45.f : 70.f;
-    if (e.hurt > 0) { e.hurt -= dt; if ((e.vill || e.monk) && !e.recall && !e.carry) { Bld* mon = nullptr; if (e.monk) for (auto& b : S.b) if (b.type == B_MONASTERY && isDone(b)) mon = &b; Bld& dst = mon ? *mon : tcB(); e.tx = dst.x + dst.w / 2.f; e.ty = dst.y + dst.h + 0.8f; e.go = true; e.recall = true; e.autoX = false; } }
+    if (e.maxHp <= 0) e.maxHp = e.hp = e.vill ? villHp() : e.monk ? 45.f : 70.f;
+    if (e.hurt > 0) { e.hurt -= dt; if ((e.vill || e.monk) && !e.recall && !e.carry && !(e.vill && S.meta.boon == BOON_HARDY && e.hp > 0.4f * e.maxHp)) { Bld* mon = nullptr; if (e.monk) for (auto& b : S.b) if (b.type == B_MONASTERY && isDone(b)) mon = &b; Bld& dst = mon ? *mon : tcB(); e.tx = dst.x + dst.w / 2.f; e.ty = dst.y + dst.h + 0.8f; e.go = true; e.recall = true; e.autoX = false; } }
     else if (e.hp < e.maxHp) e.hp = std::min(e.maxHp, e.hp + 1.5f * dt);
     if (e.hp <= 0) kill = true;
     if (kill) { if (e.vill) S.villagers = std::max(0, S.villagers - 1); if (e.carry) S.relics.push_back({S.aid++, e.x, e.y}); toast(e.monk ? "A monk was killed by wild animals!" : e.vill ? "A villager was killed by wild animals!" : "Your scout was killed by wild animals!"); S.expl.erase(S.expl.begin() + i); continue; }
@@ -429,16 +430,17 @@ Cost tradeIncome(const Enemy& e) {
   int second = e.quad == 1 ? WOOD : e.quad == 2 ? FOOD : STONE; c.v[second] = roundi(gold * 0.6f); return c;
 }
 const char* diploBlock(const Enemy& e, int p) {
-  if (S.t < e.talkAt) return "They will not talk to you right now";
+  if (S.t < e.talkAt && S.meta.boon != BOON_DIPLOMAT) return "They will not talk to you right now";
   if (p == DP_PEACE && e.stance >= ST_PEACE) return "Already at peace";
   if (p == DP_TRADE) { if (e.stance < ST_PEACE) return "Make peace first"; if (e.stance >= ST_TRADE) return "A trade route already exists"; if (tradeRoutesAllowed() == 0) return "You need a Market to trade"; if (tradeRoutesActive() >= tradeRoutesAllowed()) return "Your Market cannot support another route (upgrade it)"; }
-  if (p == DP_ALLY) { if (e.stance < ST_TRADE) return "Open a trade route first"; if (e.stance >= ST_ALLY) return "Already allies"; }
+  if (p == DP_ALLY) { if (e.stance < (S.meta.boon == BOON_DIPLOMAT ? ST_PEACE : ST_TRADE)) return S.meta.boon == BOON_DIPLOMAT ? "Make peace first" : "Open a trade route first"; if (e.stance >= ST_ALLY) return "Already allies"; }
   return nullptr;
 }
 float diploChance(const Enemy& e, int p) {
   static const float base[3][4] = {{0.70f, 0.35f, 0.80f, 0.25f}, {0.50f, 0.30f, 0.85f, 0.20f}, {0.40f, 0.15f, 0.50f, 0.10f}};     // by personality: Turtle, Raider, Merchant, Warlord
-  float c = base[clampi(p, 0, 2)][clampi(e.pers, 0, 3)] + 0.07f * e.trust + 0.04f * clampi(tcLvl() - e.tc, -4, 4) - 0.10f * S.betrayals;
-  if (p == DP_PEACE && e.stance == ST_WAR) c *= 0.8f; return clampf(c, 0.03f, 0.95f);
+  float c = base[clampi(p, 0, 2)][clampi(e.pers, 0, 3)] + 0.07f * e.trust + 0.04f * clampi(tcLvl() - e.tc, -4, 4) - (S.meta.boon == BOON_DIPLOMAT ? 0.03f : 0.10f) * S.betrayals;
+  if (S.meta.boon == BOON_DIPLOMAT) c += 0.30f;
+  if (p == DP_PEACE && e.stance == ST_WAR) c *= S.meta.boon == BOON_DIPLOMAT ? 0.95f : 0.8f; return clampf(c, 0.03f, S.meta.boon == BOON_DIPLOMAT ? 0.98f : 0.95f);
 }
 bool diploPropose(int id, int p, std::string& msg) {
   Enemy* e = findEnemy(id); if (!e) return false;
@@ -449,7 +451,7 @@ bool diploPropose(int id, int p, std::string& msg) {
     else if (p == DP_TRADE) { e->stance = ST_TRADE; msg = "A trade route is open with " + e->name + "."; }
     else { e->stance = ST_ALLY; msg = e->name + " swears to protect you - and shares his view of the map."; }
     e->trust = std::min(5.f, e->trust + 1.f); sfx(13);
-  } else { e->talkAt = S.t + 240; e->trust = std::max(0.f, e->trust - 0.5f); msg = e->name + " refuses. He will not talk for a few minutes."; sfx(15); }
+  } else { e->talkAt = S.t + (S.meta.boon == BOON_DIPLOMAT ? 0 : 240); e->trust = std::max(0.f, e->trust - (S.meta.boon == BOON_DIPLOMAT ? 0.1f : 0.5f)); msg = e->name + (S.meta.boon == BOON_DIPLOMAT ? " refuses - for now. Try again." : " refuses. He will not talk for a few minutes."); sfx(15); }
   return ok;
 }
 Cost diploGiftCost(const Enemy& e) { return mkc(0, 0, 100 * e.tc); }
@@ -470,21 +472,32 @@ bool sendMonk() {
   S.army[U_MONK]--; Explorer e{}; e.id = S.aid++; e.monk = true; e.maxHp = e.hp = 45.f; e.x = e.tx = src.x + src.w / 2.f; e.y = e.ty = src.y + src.h + 0.8f; e.face = 3; S.expl.push_back(e);
   toast("Monk sent out - tap the map, then tap a relic to fetch it"); return true;
 }
-// ---- prestige: once the Town Center is maxed you may start over and earn points for permanent unlocks (rewards to be decided)
-const PrestigeDef PRESTIGE[NPRESTIGE] = {
-  {"Reward slot 1", "Placeholder: the effect of this unlock is not decided yet.", 1}, {"Reward slot 2", "Placeholder: the effect of this unlock is not decided yet.", 1},
-  {"Reward slot 3", "Placeholder: the effect of this unlock is not decided yet.", 2}, {"Reward slot 4", "Placeholder: the effect of this unlock is not decided yet.", 2},
-  {"Reward slot 5", "Placeholder: the effect of this unlock is not decided yet.", 3}, {"Reward slot 6", "Placeholder: the effect of this unlock is not decided yet.", 3},
-  {"Reward slot 7", "Placeholder: the effect of this unlock is not decided yet.", 4}, {"Reward slot 8", "Placeholder: the effect of this unlock is not decided yet.", 5},
+// ---- prestige: once the Town Center is maxed you may ascend: pick a civilization (how your buildings look) and one reward for the new realm
+const CivDef CIVS[NCIV] = {
+  {"", "Byzantines", "Plastered walls, terracotta and blue slate roofs, stone castles with round towers."},
+  {"sl", "Slavs", "Log cabins with carved trim, red-brick Kremlin walls, tent roofs and gleaming onion domes."},
+  {"fr", "Franks", "Pale limestone, half-timbered houses, steep blue slate roofs and soaring spires."},
+  {"ce", "Celts", "Round thatched houses, drystone towers, deep thatch roofs, standing stones and high crosses."},
+  {"ja", "Japanese", "White plaster and dark timber under sweeping, upswept tile roofs with stone lanterns."},
+  {"sp", "Spanish", "Whitewashed walls, sandstone castles, low terracotta roofs, domes and arched windows."},
+  {"mo", "Mongols", "Felt gers and pavilion tents, painted lattice, spiked palisades and horsetail standards."},
+};
+const BoonDef BOONS[NBOON] = {
+  {"No reward", ""},
+  {"Bountiful Lands", "Resource production is 75% higher for your whole next realm."},
+  {"Veteran's Return", "Troops that survive a raid march back to your Army Camp instead of being spent."},
+  {"Silver Tongue", "A huge boost to diplomacy: rival lords agree to peace, trade and alliances far more often, never stay angry for long, and will ally with you straight after making peace."},
+  {"Hardy Villagers", "Villagers have over three times the health and fight back: one villager can beat a wolf on his own."},
 };
 bool prestigeAvailable() { return tcLvl() >= MAXTC; }
-bool prestigeHas(int i) { return i >= 0 && i < NPRESTIGE && (S.meta.unlocked & (1u << i)) != 0; }
-bool prestigeBuy(int i) { if (i < 0 || i >= NPRESTIGE || prestigeHas(i) || S.meta.points < PRESTIGE[i].cost) return false; S.meta.points -= PRESTIGE[i].cost; S.meta.unlocked |= (1u << i); return true; }
+bool outlineOwned() { return (S.meta.unlocked & UNLOCK_OUTLINE) != 0; }
+bool outlineChoiceOpen(int prestigeAfter) { return prestigeAfter >= 2 && !outlineOwned(); }
+const char* civCode(int civ) { return CIVS[clampi(civ, 0, NCIV - 1)].code; }
 bool nodeVisible(const Node& n) { return n.type == N_TREE || tcLvl() >= 3; }
 void rebalanceNodes() { for (auto& n : S.nodes) { float want = n.type == N_TREE ? (float)TREE_WOOD : n.type == N_GOLD ? (float)GOLD_AMT : (float)STONE_AMT; if (!homeRect((float)n.x, (float)n.y)) want = n.type == N_TREE ? (float)TREE_WOOD : n.type == N_GOLD ? GOLD_AMT * 1.4f : STONE_AMT * 1.5f; if (n.max < want) { float f = n.max > 0 ? n.amt / n.max : 1.f; n.max = want; n.amt = f * want; } } }
 float gatherMul(int res) {
   int n = res == WOOD ? S.tech[T_WOOD1] + S.tech[T_WOOD2] + S.tech[T_WOOD3] : res == GOLD ? S.tech[T_GOLD1] + S.tech[T_GOLD2] + S.tech[T_GOLD3] : res == STONE ? S.tech[T_STONE1] + S.tech[T_STONE2] + S.tech[T_STONE3] : S.tech[T_FARM1] + S.tech[T_FARM2] + S.tech[T_FARM3];
-  return 1.f + 0.25f * n;
+  return (1.f + 0.25f * n) * (S.meta.boon == BOON_PROSPER ? 1.75f : 1.f);
 }   // older saves: refill trees to the new size, keeping how much is left
 void topUpNodes() {
   int tc = tcLvl(); int want[3] = {std::min(120, 48 + 10 * (tc - 1)), tc >= 3 ? std::min(22, 5 + 2 * (tc - 3)) : 0, tc >= 3 ? std::min(20, 5 + 2 * (tc - 3)) : 0};
@@ -879,7 +892,7 @@ static std::string savePath() {
 void saveGame() {
   S.lastSeen = (long long)std::time(nullptr);
   std::ostringstream o; o.precision(9);
-  o << "DOK13 " << S.t << ' ' << S.villagers << ' ' << S.renown << ' ' << S.shieldUntil << ' ' << S.nextRaid << ' ' << S.nid << ' ' << S.seed << ' ' << S.rivalSeq << ' ' << (int)S.seenIntro << ' ' << S.lastSeen << '\n';
+  o << "DOK14 " << S.t << ' ' << S.villagers << ' ' << S.renown << ' ' << S.shieldUntil << ' ' << S.nextRaid << ' ' << S.nid << ' ' << S.seed << ' ' << S.rivalSeq << ' ' << (int)S.seenIntro << ' ' << S.lastSeen << '\n';
   for (int i = 0; i < NRES; i++) o << S.res[i] << ' '; o << '\n';
   o << (int)U_COUNT << ' '; for (int i = 0; i < U_COUNT; i++) o << S.army[i] << ' '; o << '\n';
   o << NCAMP << ' '; for (int i = 0; i <= NCAMP; i++) o << S.camp[i] << ' '; for (int i = 0; i <= NCAMP; i++) o << S.campWins[i] << ' '; o << '\n';
@@ -914,12 +927,13 @@ void saveGame() {
   for (auto& rl : S.relics) o << rl.id << ' ' << rl.x << ' ' << rl.y << '\n';
   o << S.squads.size() << '\n'; for (auto& q : S.squads) { o << q.id << ' ' << q.x << ' ' << q.y << ' ' << q.tx << ' ' << q.ty << ' ' << (int)q.go << ' ' << (int)q.recall << ' ' << q.mode << ' ' << q.target << ' ' << q.gx << ' ' << q.gy << ' ' << q.u.size(); for (auto& u : q.u) o << ' ' << u.type << ' ' << u.hp; o << '\n'; }
   o << S.musicVol << ' ' << S.sfxVol << '\n';
+  o << S.meta.civ << ' ' << S.meta.boon << ' ' << (S.meta.outlineOn ? 1 : 0) << '\n';
   std::ofstream f(savePath(), std::ios::binary | std::ios::trunc); f << o.str();
 }
 bool loadGame() {
   std::ifstream f(savePath(), std::ios::binary); if (!f) return false;
-  std::string magic; f >> magic; if (magic != "DOK1" && magic != "DOK2" && magic != "DOK3" && magic != "DOK4" && magic != "DOK5" && magic != "DOK6" && magic != "DOK7" && magic != "DOK8" && magic != "DOK9" && magic != "DOK10" && magic != "DOK11" && magic != "DOK12" && magic != "DOK13") return false;
-  bool dok13 = magic == "DOK13", dok12 = magic == "DOK12" || dok13, dok11 = magic == "DOK11" || dok12, dok10 = magic == "DOK10" || dok11, dok9 = magic == "DOK9" || dok10, dok8 = magic == "DOK8" || dok9, dok7 = magic == "DOK7" || dok8; if (dok7) magic = "DOK6";
+  std::string magic; f >> magic; if (magic != "DOK1" && magic != "DOK2" && magic != "DOK3" && magic != "DOK4" && magic != "DOK5" && magic != "DOK6" && magic != "DOK7" && magic != "DOK8" && magic != "DOK9" && magic != "DOK10" && magic != "DOK11" && magic != "DOK12" && magic != "DOK13" && magic != "DOK14") return false;
+  bool dok14 = magic == "DOK14", dok13 = magic == "DOK13" || dok14, dok12 = magic == "DOK12" || dok13, dok11 = magic == "DOK11" || dok12, dok10 = magic == "DOK10" || dok11, dok9 = magic == "DOK9" || dok10, dok8 = magic == "DOK8" || dok9, dok7 = magic == "DOK7" || dok8; if (dok7) magic = "DOK6";
   int armyN = magic == "DOK1" ? 3 : 9;
   State n; int seen = 0;
   f >> n.t >> n.villagers >> n.renown >> n.shieldUntil >> n.nextRaid >> n.nid >> n.seed >> n.rivalSeq >> seen >> n.lastSeen; n.seenIntro = seen;
@@ -972,6 +986,7 @@ bool loadGame() {
   if (dok10) { size_t nr = 0; f >> n.meta.prestige >> n.meta.points >> n.meta.unlocked >> n.relicsHeld >> n.betrayals >> n.relicCheck >> nr; for (size_t i = 0; i < nr; i++) { Relic rl; f >> rl.id >> rl.x >> rl.y; n.relics.push_back(rl); } }
   if (dok11) { size_t ns = 0; f >> ns; for (size_t i = 0; i < ns && f; i++) { Squad q; int go, rc; size_t nu; f >> q.id >> q.x >> q.y >> q.tx >> q.ty >> go >> rc >> q.mode >> q.target >> q.gx >> q.gy >> nu; q.go = go; q.recall = rc; for (size_t k = 0; k < nu; k++) { SqUnit u; f >> u.type >> u.hp; q.u.push_back(u); } n.squads.push_back(q); } }
   if (dok13) f >> n.musicVol >> n.sfxVol;
+  if (dok14) { int oo = 0; f >> n.meta.civ >> n.meta.boon >> oo; n.meta.outlineOn = oo != 0; n.meta.civ = clampi(n.meta.civ, 0, NCIV - 1); n.meta.boon = clampi(n.meta.boon, 0, NBOON - 1); }
   if (!f || n.b.empty()) return false;
   S = n;
   if (magic != "DOK6") genWorld(); else if (!dok9) genWorldOldSave();

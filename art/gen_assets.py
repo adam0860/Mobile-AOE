@@ -9,8 +9,10 @@ from mathutils import Vector, Euler, Matrix
 argv = sys.argv[sys.argv.index('--') + 1:] if '--' in sys.argv else []
 def arg(name, default=None):
     return argv[argv.index(name) + 1] if name in argv else default
-OUT = os.path.abspath(arg('--out', 'art/renders'))
+CIV = arg('--civ')                # civilization code (sl fr ce ja sp mo): render that civ's building set only (see civ_lib.py)
+OUT = os.path.abspath(arg('--out', 'art/renders_civ' if CIV else 'art/renders'))
 ONLY = set(arg('--only', '').split(',')) - {''}
+PFX = (CIV + '_') if CIV else ''
 ENGINE = arg('--engine', 'EEVEE')
 SAMPLES = int(arg('--samples', '48'))
 os.makedirs(OUT, exist_ok=True)
@@ -419,6 +421,7 @@ def crenellations(x, y, z, sx, sy, mat, n=6, hgt=0.12):
 # ---------------------------------------------------------------- render
 MANIFEST = {}
 def render(name, W, H, oy, target=(0, 0, 0), ox=None, pxm=None):
+    name = PFX + name
     ox = W / 2 if ox is None else ox
     place_camera(W, H, ox, oy, target, pxm)
     path = os.path.join(OUT, name + '.png')
@@ -458,12 +461,21 @@ exec(open(os.path.join(HERE, 'models_icons.py'), encoding='utf-8').read(), globa
 exec(open(os.path.join(HERE, 'models_explore.py'), encoding='utf-8').read(), globals())
 exec(open(os.path.join(HERE, 'models_camps.py'), encoding='utf-8').read(), globals())
 
+def civ_pre(name):
+    pass
+if CIV:
+    exec(open(os.path.join(HERE, 'civ_lib.py'), encoding='utf-8').read(), globals())
+    if not ONLY:
+        ONLY = set(CIV_ALLOW)
+    civ_apply(CIV)
+
 import zlib
 NODECOR = ('relic', 'lumber', 'goldcamp', 'stonecamp', 'deer', 'boar', 'wolf', 'chest', 'wall_', 'gate_', 'spike', 'oil', 'wallrubble', 'oak', 'pine', 'palm', 'node_', 'bush', 'tuft', 'rock', 'flower', 'rubble', 'scaffold', 'stump', 'decor', 'ground', 'farm')
 def do_building(name, fw, fh, up, fn, *a):
     if not should(name):
         return
     clear_models()
+    civ_pre(name)
     fn(*a)
     if not name.startswith(NODECOR):
         decorate(name, fw, fh, zlib.crc32(name.encode()) % 100000)
@@ -615,7 +627,7 @@ if should('ground'):
         for cj in range(2):
             render('ground_%d_%d' % (ci, cj), CW, CH, oyf - cj * CH, target=(15, -15, 0), ox=FW / 2 - ci * CW, pxm=PXM_G)
 
-mf = os.path.join(OUT, 'manifest.json')
+mf = os.path.join(OUT, 'manifest_%s.json' % CIV if CIV else 'manifest.json')
 old = {}
 if os.path.exists(mf):
     try:

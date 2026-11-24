@@ -8,10 +8,12 @@
 #define STBI_ONLY_PNG
 #include "../third_party/stb/stb_image.h"
 
-struct Page { SDL_Texture* t[2] = {nullptr, nullptr}; int w[2] = {1, 1}, h[2] = {1, 1}; };
+struct Page { SDL_Texture* t[2] = {nullptr, nullptr}; int w[2] = {1, 1}, h[2] = {1, 1}; SDL_Texture* sil = nullptr; };   // sil: half-resolution white silhouette, built only while the gold outline is on
 static std::vector<Page> pages;
 static std::unordered_map<std::string, SpriteDef> defs;
 static bool ready = false;
+static std::unordered_map<int, std::string> pageFile;        // page index -> png file (to rebuild textures / silhouettes)
+static bool outlineEnabled = false, outlineMark = false;
 
 static std::string assetPath(const std::string& name) {
 #ifdef __ANDROID__
@@ -66,12 +68,14 @@ void setEnemyTeamColor(uint32_t rgb) {
     stbi_image_free(px);
   }
 }
+static void makeSilhouette(int idx, const unsigned char* px, int w, int h);
 static bool loadPage(int idx, const std::string& file, bool units) {
   size_t n = 0; void* data = SDL_LoadFile(assetPath(file).c_str(), &n);
   if (!data) { std::fprintf(stderr, "missing asset %s\n", file.c_str()); return false; }
   int w, h, c; unsigned char* px = stbi_load_from_memory((const unsigned char*)data, (int)n, &w, &h, &c, 4); SDL_free(data);
   if (!px) { std::fprintf(stderr, "bad png %s\n", file.c_str()); return false; }
   if ((int)pages.size() <= idx) pages.resize(idx + 1);
+  pageFile[idx] = file;
   Page& pg = pages[idx]; pg.t[0] = makeTex(px, w, h); pg.w[0] = w; pg.h[0] = h;
   int hw, hh; auto half = halve(px, w, h, hw, hh);
   pg.t[1] = makeTex(half.data(), hw, hh); pg.w[1] = hw; pg.h[1] = hh;
@@ -83,11 +87,13 @@ static bool loadPage(int idx, const std::string& file, bool units) {
     auto half2 = halve(px, w, h, hw, hh);
     rp.t[1] = makeTex(half2.data(), hw, hh); rp.w[1] = hw; rp.h[1] = hh;
   }
+  if (outlineEnabled) makeSilhouette(idx, px, w, h);
   stbi_image_free(px); return true;
 }
 
-bool loadSprites() {
-  size_t n = 0; char* txt = (char*)SDL_LoadFile(assetPath("atlas.txt").c_str(), &n); if (!txt) return false;
+// ---- generic atlas text file: '@ <page> <png> [units]' declares pages (offset by `base`), then one line per sprite
+static bool loadAtlasFile(const std::string& txtName, int base, std::vector<std::string>* names, std::vector<int>* pageIdx, bool mirrorUnits) {
+  size_t n = 0; char* txt = (char*)SDL_LoadFile(assetPath(txtName).c_str(), &n); if (!txt) return false;
   std::istringstream in(std::string(txt, n)); SDL_free(txt);
   std::string line; std::vector<int> unitPages;
   std::vector<std::pair<std::string, SpriteDef>> entries;
@@ -95,20 +101,62 @@ bool loadSprites() {
     if (line.empty()) continue;
     std::istringstream ls(line);
     if (line[0] == '@') {                                   // "@ <page> <file> [units]"
-      std::string at, file, tag; int idx; ls >> at >> idx >> file >> tag;
-      bool units = tag == "units"; if (!loadPage(idx, file, units)) return false; if (units) unitPages.push_back(idx);
+      std::string at, file, tag; int idx; ls >> at >> idx >> file >> tag; idx += base;
+      bool units = mirrorUnits && tag == "units"; if (!loadPage(idx, file, units)) return false; if (units) unitPages.push_back(idx); if (pageIdx) pageIdx->push_back(idx);
     } else {
-      std::string name; SpriteDef d; ls >> name >> d.atlas >> d.x >> d.y >> d.w >> d.h >> d.ax >> d.ay >> d.scale; if (ls) entries.push_back({name, d});
+      std::string name; SpriteDef d; ls >> name >> d.atlas >> d.x >> d.y >> d.w >> d.h >> d.ax >> d.ay >> d.scale; d.atlas += base; if (ls) entries.push_back({name, d});
     }
   }
   for (auto& e : entries) {
-    defs[e.first] = e.second;
+    defs[e.first] = e.second; if (names) names->push_back(e.first);
     for (int up : unitPages) if (e.second.atlas == up) {         // mirror every unit sprite for the red team
       std::string rn = e.first; size_t p = rn.find("_blue_"); if (p != std::string::npos) { rn.replace(p, 6, "_red_"); SpriteDef r = e.second; r.atlas = up + 1000; defs[rn] = r; }
     }
   }
-  ready = !defs.empty() && !pages.empty(); return ready;
+  return true;
 }
+
+bool loadSprites() {
+  if (!loadAtlasFile("atlas.txt", 0, nullptr, nullptr, true)) return false;
+  ready = !defs.empty() && !pages.empty();
+  loadAtlasFile("civprev.txt", 2900, nullptr, nullptr, false);       // small preview pictures of every civilization (optional)
+  return ready;
+}
+// ---- civilizations: each has its own set of building sprites (<code>_house_1 ...), loaded only while that civ is in play
+struct CivLoaded { std::vector<std::string> names; std::vector<int> pages; };
+static std::unordered_map<std::string, CivLoaded> civLoaded;
+bool civSpritesLoaded(const char* code) { return civLoaded.count(code) > 0; }
+bool loadCivSprites(const char* code, int slot) {
+  if (civLoaded.count(code)) return true;
+  CivLoaded cl; if (!loadAtlasFile(std::string("civ_") + code + ".txt", 3000 + slot * 20, &cl.names, &cl.pages, false)) { for (int p : cl.pages) { Page& pg = pages[p]; for (int k = 0; k < 2; k++) if (pg.t[k]) SDL_DestroyTexture(pg.t[k]); if (pg.sil) SDL_DestroyTexture(pg.sil); pg = Page(); } for (auto& n : cl.names) defs.erase(n); return false; }
+  civLoaded[code] = cl; return true;
+}
+void unloadCivSprites(const char* code) {
+  auto it = civLoaded.find(code); if (it == civLoaded.end()) return;
+  for (auto& n : it->second.names) defs.erase(n);
+  for (int p : it->second.pages) { Page& pg = pages[p]; for (int k = 0; k < 2; k++) if (pg.t[k]) SDL_DestroyTexture(pg.t[k]); if (pg.sil) SDL_DestroyTexture(pg.sil); pg = Page(); pageFile.erase(p); }
+  civLoaded.erase(it);
+}
+// ---- gold outline: a half-resolution white silhouette of every page, drawn in gold around the sprite at 8 offsets
+static void makeSilhouette(int idx, const unsigned char* px, int w, int h) {
+  Page& pg = pages[idx]; if (pg.sil) return;
+  int hw, hh; auto half = halve(px, w, h, hw, hh);
+  for (size_t i = 0, n = (size_t)hw * hh; i < n; i++) { half[i * 4] = half[i * 4 + 1] = half[i * 4 + 2] = 255; }
+  pg.sil = makeTex(half.data(), hw, hh);
+}
+void setOutlineEnabled(bool on) {
+  if (on == outlineEnabled) return; outlineEnabled = on;
+  for (size_t i = 0; i < pages.size(); i++) {
+    Page& pg = pages[i];
+    if (!on) { if (pg.sil) { SDL_DestroyTexture(pg.sil); pg.sil = nullptr; } continue; }
+    auto f = pageFile.find((int)i); if (f == pageFile.end() || !pg.t[0] || (i >= 1000 && i < 2000) || f->second.compare(0, 6, "ground") == 0) continue;
+    size_t n = 0; void* data = SDL_LoadFile(assetPath(f->second).c_str(), &n); if (!data) continue;
+    int w, h, c; unsigned char* px = stbi_load_from_memory((const unsigned char*)data, (int)n, &w, &h, &c, 4); SDL_free(data); if (!px) continue;
+    makeSilhouette((int)i, px, w, h); stbi_image_free(px);
+  }
+}
+bool outlineIsEnabled() { return outlineEnabled; }
+void setSpriteOutline(bool mark) { outlineMark = mark; }
 bool spritesReady() { return ready; }
 const SpriteDef* findSprite(const std::string& name) { auto it = defs.find(name); return it == defs.end() ? nullptr : &it->second; }
 
@@ -124,9 +172,19 @@ static SDL_Rect srcRect(const SpriteDef& s, int lod) {
 
 static Uint8 tintR = 255, tintG = 255, tintB = 255;
 void setSpriteTint(uint32_t rgb) { tintR = (rgb >> 16) & 255; tintG = (rgb >> 8) & 255; tintB = rgb & 255; }
+static void drawOutline(const SpriteDef& s, float sx, float sy, float k, float alpha) {
+  Page& p = pages[s.atlas]; if (!p.sil) return;
+  SDL_Rect src{s.x / 2, s.y / 2, std::max(1, s.w / 2), std::max(1, s.h / 2)};
+  SDL_FRect dst{sx - s.ax * k, sy - s.ay * k, s.w * k, s.h * k};
+  float t = clampf(0.9f * G.u * (0.8f + 0.7f * k * s.scale), 1.4f, 4.2f);              // outline thickness in screen pixels
+  SDL_SetTextureColorMod(p.sil, 255, 208, 70); SDL_SetTextureAlphaMod(p.sil, (Uint8)(clampf(alpha, 0, 1) * 240));
+  static const float ox[8] = {1, -1, 0, 0, 0.72f, -0.72f, 0.72f, -0.72f}, oy[8] = {0, 0, 1, -1, 0.72f, 0.72f, -0.72f, -0.72f};
+  for (int i = 0; i < 8; i++) { SDL_FRect d2{dst.x + ox[i] * t, dst.y + oy[i] * t, dst.w, dst.h}; SDL_RenderCopyF(G.r, p.sil, &src, &d2); }
+}
 void drawSprite(const SpriteDef& s, float sx, float sy, float zoom, float alpha, float scaleMul) {
   LodPick lp = pick(s, zoom, scaleMul); SDL_Rect src = srcRect(s, lp.lod); float k = lp.k;
   SDL_FRect dst{sx - s.ax * k, sy - s.ay * k, s.w * k, s.h * k};
+  if (outlineEnabled && outlineMark) drawOutline(s, sx, sy, k, alpha);
   SDL_SetTextureAlphaMod(lp.t, (Uint8)(clampf(alpha, 0, 1) * 255));
   SDL_SetTextureColorMod(lp.t, tintR, tintG, tintB);
   SDL_RenderCopyF(G.r, lp.t, &src, &dst);

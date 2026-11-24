@@ -13,3 +13,5 @@ art/prev*.png
 art/ld_*.png
 art/preview*.png
 third_party/**/build/
+art/renders_civ/
+art/_t/

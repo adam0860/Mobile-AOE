@@ -19,11 +19,11 @@
 
 // ============================================================ app state
 enum View { V_HOME, V_BATTLE };
-enum Modal { M_NONE, M_INTRO, M_BUILD, M_ARMY, M_LADDER, M_RAID, M_SCOUT, M_ATK_RESULT, M_DEF_RESULT, M_WELCOME, M_SEASON, M_SETTINGS, M_EXPLORE, M_OUTPOST, M_REPLAYS, M_PRESET, M_DIPLO, M_PRESTIGE, M_SQUADS };
+enum Modal { M_NONE, M_INTRO, M_BUILD, M_ARMY, M_LADDER, M_RAID, M_SCOUT, M_ATK_RESULT, M_DEF_RESULT, M_WELCOME, M_SEASON, M_SETTINGS, M_EXPLORE, M_OUTPOST, M_REPLAYS, M_PRESET, M_DIPLO, M_PRESTIGE, M_SQUADS, M_ASCEND };
 enum Kind { K_BARB, K_RIVAL, K_DEFENCE };
 
 struct Scout { bool rival = false; int i = 0; Base base; std::string title; int opp = 0, tc = 1, win = 0, lose = 0, diff = 0; float lootF = 1, winF = 1; int enemyId = -1; std::vector<int> srcIdx; bool sneak = false; int fromSquad = -1; };
-struct AtkResult { bool win; int stars, pct; Cost got; int dr; int surv[U_COUNT]; Kind kind; };
+struct AtkResult { bool win; int stars, pct; Cost got; int dr; int surv[U_COUNT]; Kind kind; int ret[U_COUNT]; };
 
 static View view = V_HOME;
 static Modal modal = M_NONE;
@@ -43,6 +43,14 @@ static void applyEnemyPalette(int idx) { int want = idx < 0 ? 0 : idx; if (palet
 static uint32_t lordTintOf(int c) { return mixc(0xffffff, LORD_COL[clampi(c, 0, NLORDCOL - 1)], 0.55f); }
 static int sqSel = -1; static bool sqEscortPending = false; static int sqForm[U_COUNT]; static int savedArmy[U_COUNT]; static bool squadBattle = false;
 static int diploEnemy = -1; static std::string diploMsg; static bool armRestart = false, armAscend = false;
+constexpr int REW_OUTLINE = 5; static int ascCiv = 0, ascReward = 0;      // ascension screen: chosen civilization and reward (1..4 = boons, 5 = gold outline)
+static int loadedCiv = 0;                                                   // civilization whose building sprites are in memory
+static void syncCiv() {                                                     // keep the civ sprite set and the gold outline in step with the game state
+  if (!spritesReady()) return;
+  int want = clampi(S.meta.civ, 0, NCIV - 1);
+  if (want != loadedCiv) { if (loadedCiv > 0) unloadCivSprites(civCode(loadedCiv)); if (want > 0) loadCivSprites(civCode(want), want); loadedCiv = want; }
+  setOutlineEnabled(S.meta.outlineOn && outlineOwned());
+}
 static int enemySel = -1;                       // selected rival lord (tap one of their buildings)
 static std::string bmWhy;                        // why the building cannot go where the ghost is
 static int explSel = -1;                       // selected explorer (tap the map to send it)
@@ -295,7 +303,7 @@ static int simFrame(const SimUnit& u) {
 static void drawUnitSpr(float gx, float gy, int kind, bool red, int dir, int frame, float alpha = 1.f, float hit = 0.f, int tool = -1, float yoff = 0.f) {
   Pt p = iso(gx, gy); p.y += yoff * cam.zoom;
   if (const SpriteDef* sp = unitSpriteFor(kind, red, dir, frame, tool)) {
-    drawSpriteShadow(*sp, p.x, p.y, cam.zoom, 0.30f * alpha); drawSprite(*sp, p.x, p.y, cam.zoom, alpha);
+    drawSpriteShadow(*sp, p.x, p.y, cam.zoom, 0.30f * alpha); setSpriteOutline(!red); drawSprite(*sp, p.x, p.y, cam.zoom, alpha); setSpriteOutline(false);
     if (hit > 0) drawSpriteGlow(*sp, p.x, p.y, cam.zoom, std::min(1.f, hit / 0.16f) * 0.75f * alpha);
   } else drawUnitFig(gx, gy, kind < 0 ? 0xf0e4c8 : kind >= U_COUNT ? 0xd8b070 : udef(kind).color, 3.4f, frame >= 7, red);
 }
@@ -328,43 +336,48 @@ static void drawRubble(const SimB& b, float alpha = 1.f) {
   if (spritesReady()) { if (const SpriteDef* sp = findSprite(b.w >= 4 ? "rubble_4" : b.w >= 3 ? "rubble_3" : "rubble_2")) drawSprite(*sp, c.x, c.y, cam.zoom, alpha); }
   else polyFill({iso(b.x, b.y), iso(b.x + b.w, b.y), iso(b.x + b.w, b.y + b.h), iso(b.x, b.y + b.h)}, 0x1e140a, 0.55f * alpha);
 }
-struct BView { BType type; int lvl; float x, y; int w, h; float hpf; bool simMode; bool building; float prog; bool sel; int status; int workers = 0, slots = 0; };
-static const SpriteDef* spriteByAge(const char* base, int age) {
+struct BView { BType type; int lvl; float x, y; int w, h; float hpf; bool simMode; bool building; float prog; bool sel; int status; int workers = 0, slots = 0; bool own = false; };   // own: the player's building (civilization style, gold outline)
+static const SpriteDef* spriteByAge(const char* base, int age, const std::string& pf = "") {
   char nm[64];
   for (int d = 0; d < 4; d++) for (int sgn = -1; sgn <= 1; sgn += 2) {
     int a = age + sgn * d; if (a < 0 || a > 3) continue;
-    std::snprintf(nm, sizeof nm, "%s_%d", base, a); if (const SpriteDef* sp = findSprite(nm)) return sp;
+    std::snprintf(nm, sizeof nm, "%s_%d", base, a); if (const SpriteDef* sp = findSprite(pf + nm)) return sp;
   }
   return nullptr;
 }
-static const SpriteDef* buildingSprite(BType t, int lvl, int age) {
+static const SpriteDef* buildingSpriteP(BType t, int lvl, int age, const std::string& pf) {      // pf = civilization prefix ("ja_") or "" for the stock sprites
   age = clampi(age, 0, 3); lvl = clampi(lvl, 1, MAXLVL); char nm[48];
   switch (t) {
-    case B_TOWNHALL: std::snprintf(nm, sizeof nm, "townhall_%d", lvl); return findSprite(nm);
-    case B_TOWER: std::snprintf(nm, sizeof nm, "tower_%d", lvl <= 1 ? 1 : lvl <= 3 ? 2 : lvl <= 5 ? 3 : 4); return findSprite(nm);
-    case B_HOUSE: return spriteByAge("house", age);
-    case B_LUMBER: return spriteByAge("lumber", age);
-    case B_GOLDCAMP: return spriteByAge("goldcamp", age);
-    case B_STONECAMP: return spriteByAge("stonecamp", age);
-    case B_FARM: return spriteByAge("farm", age);
-    case B_BARRACKS: return spriteByAge("barracks", age);
-    case B_ARMYCAMP: return spriteByAge("armycamp", age);
-    case B_ARCHERY: return spriteByAge("archery", age);
-    case B_STABLE: return spriteByAge("stable", age);
-    case B_SIEGE: return spriteByAge("siege", age);
-    case B_MONASTERY: return spriteByAge("monastery", age);
-    case B_KEEP: return spriteByAge("keep", age);
-    case B_BLACKSMITH: return spriteByAge("blacksmith", age);
-    case B_MARKET: return spriteByAge("market", age);
-    case B_CASTLE: return spriteByAge("castle", age);
-    case B_UNIVERSITY: return spriteByAge("university", age);
-    case B_BOMBARD: return spriteByAge("bombard", age);
-    case B_SCORPION: return spriteByAge("scorpion", age);
-    case B_STOREHOUSE: return findSprite("storehouse_0");
-    case B_MILL: return findSprite("mill_0");
-    case B_TENT: return findSprite("tent_0");
-    default: return findSprite("chief_0");
+    case B_TOWNHALL: std::snprintf(nm, sizeof nm, "townhall_%d", lvl); return findSprite(pf + nm);
+    case B_TOWER: std::snprintf(nm, sizeof nm, "tower_%d", lvl <= 1 ? 1 : lvl <= 3 ? 2 : lvl <= 5 ? 3 : 4); return findSprite(pf + nm);
+    case B_HOUSE: return spriteByAge("house", age, pf);
+    case B_LUMBER: return spriteByAge("lumber", age, pf);
+    case B_GOLDCAMP: return spriteByAge("goldcamp", age, pf);
+    case B_STONECAMP: return spriteByAge("stonecamp", age, pf);
+    case B_FARM: return spriteByAge("farm", age, pf);
+    case B_BARRACKS: return spriteByAge("barracks", age, pf);
+    case B_ARMYCAMP: return spriteByAge("armycamp", age, pf);
+    case B_ARCHERY: return spriteByAge("archery", age, pf);
+    case B_STABLE: return spriteByAge("stable", age, pf);
+    case B_SIEGE: return spriteByAge("siege", age, pf);
+    case B_MONASTERY: return spriteByAge("monastery", age, pf);
+    case B_KEEP: return spriteByAge("keep", age, pf);
+    case B_BLACKSMITH: return spriteByAge("blacksmith", age, pf);
+    case B_MARKET: return spriteByAge("market", age, pf);
+    case B_CASTLE: return spriteByAge("castle", age, pf);
+    case B_UNIVERSITY: return spriteByAge("university", age, pf);
+    case B_BOMBARD: return spriteByAge("bombard", age, pf);
+    case B_SCORPION: return spriteByAge("scorpion", age, pf);
+    case B_STOREHOUSE: return findSprite(pf + "storehouse_0");
+    case B_MILL: return findSprite(pf + "mill_0");
+    case B_TENT: return findSprite(pf + "tent_0");
+    default: return findSprite(pf + "chief_0");
   }
+}
+// own = one of the player's buildings: drawn in the chosen civilization's architecture where that civ has a sprite for it
+static const SpriteDef* buildingSprite(BType t, int lvl, int age, bool own = false) {
+  if (own && S.meta.civ > 0 && S.meta.civ < NCIV) { if (const SpriteDef* sp = buildingSpriteP(t, lvl, age, std::string(civCode(S.meta.civ)) + "_")) return sp; }
+  return buildingSpriteP(t, lvl, age, "");
 }
 static bool wallGrid[WORLD * WORLD];
 static bool wallAt(int x, int y) { return x >= -WEXT && y >= -WEXT && x < WHI && y < WHI && wallGrid[(y + WEXT) * WORLD + (x + WEXT)]; }
@@ -378,9 +391,9 @@ static const SpriteDef* pieceSprite(BType t, int lvl, int x, int y) {
   return findSprite(t == B_SPIKE ? "spike_0" : "oil_0");
 }
 static const SpriteDef* scaffoldFor(int w) { return findSprite(w >= 4 ? "scaffold_4" : w >= 3 ? "scaffold_3" : "scaffold_2"); }
-static void drawBuilding(const BView& b, int age) {
+static void drawBuildingImpl(const BView& b, int age) {
   const BDef& d = bdef(b.type);
-  const SpriteDef* sp = !spritesReady() ? nullptr : isPiece(b.type) ? pieceSprite(b.type, b.lvl, (int)b.x, (int)b.y) : buildingSprite(b.type, b.lvl, age);
+  const SpriteDef* sp = !spritesReady() ? nullptr : isPiece(b.type) ? pieceSprite(b.type, b.lvl, (int)b.x, (int)b.y) : buildingSprite(b.type, b.lvl, age, b.own);
   if (sp) {
     Pt c = iso(b.x + b.w / 2.f, b.y + b.h / 2.f); float z = cam.zoom;
     if (b.lvl == 0) {
@@ -429,6 +442,7 @@ static void drawBuilding(const BView& b, int age) {
   if (!b.simMode && b.status == 4) G.text("no nodes", top.x, top.y - U(28), F_S, C_BAD, A_CENTER);
 }
 
+static void drawBuilding(const BView& b, int age) { setSpriteOutline(b.own); drawBuildingImpl(b, age); setSpriteOutline(false); }
 struct Item { float d; std::function<void()> f; };
 static void drawGround(int tc, bool grid) {
   Pt A = iso(0, 0), Bp = iso(MAP, 0), C = iso(MAP, MAP), D = iso(0, MAP);
@@ -602,7 +616,7 @@ static void drawHome() {
   }
   for (auto& b : S.b) {
     int vl = (b.type == B_WALL || b.type == B_GATE) ? S.wallLvl : (b.type == B_SPIKE || b.type == B_OIL) ? S.trapLvl : b.lvl;
-    BView v{b.type, vl, (float)b.x, (float)b.y, b.w, b.h, 1, false, b.building, b.building ? clampf((float)((S.t - b.bStart) / (b.bEnd - b.bStart)), 0, 1) : 0, b.id == selId, b.status};
+    BView v{b.type, vl, (float)b.x, (float)b.y, b.w, b.h, 1, false, b.building, b.building ? clampf((float)((S.t - b.bStart) / (b.bEnd - b.bStart)), 0, 1) : 0, b.id == selId, b.status}; v.own = true;
     if (bdef(b.type).res >= 0 && isDone(b)) { v.workers = b.workers; v.slots = bslots(b.type, b.lvl); }
     items.push_back({dep(b.x + b.w / 2.f, b.y + b.h / 2.f), [v, age] { drawBuilding(v, age); }});
   }
@@ -654,7 +668,7 @@ static void drawHome() {
       if (bmPaint) { polyFill({iso(x, y), iso(x + 1, y), iso(x + 1, y + 1), iso(x, y + 1)}, ok ? 0x50ff78 : 0xff4646, 0.5f); return; }
       polyFill({iso(x, y), iso(x + d.w, y), iso(x + d.w, y + d.h), iso(x, y + d.h)}, ok ? 0x50ff78 : 0xff4646, 0.45f);
       if (const SpriteDef* sp = spriteNamed("") ; sp) {}
-      if (const SpriteDef* sp = spritesReady() ? buildingSprite(ty, 1, std::min(ageOf(tcLvl()), 3)) : nullptr) { Pt c = iso(x + d.w / 2.f, y + d.h / 2.f); drawSprite(*sp, c.x, c.y, cam.zoom, ok ? 0.6f : 0.35f); }
+      if (const SpriteDef* sp = spritesReady() ? buildingSprite(ty, 1, std::min(ageOf(tcLvl()), 3), true) : nullptr) { Pt c = iso(x + d.w / 2.f, y + d.h / 2.f); drawSprite(*sp, c.x, c.y, cam.zoom, ok ? 0.6f : 0.35f); }
       else boxDraw((float)x, (float)y, d.w, d.h, d.hgt, ok ? 0x6fd88a : 0xd86f6f, 0.55f);
     }});
   }
@@ -675,12 +689,12 @@ static void drawBattle() {
       const SimB* bp = &b; float fall = bp->deadT;
       items.push_back({dep(b.x + b.w / 2.f, b.y + b.h / 2.f) - .5f, [bp, age, fall] {
         if (fall < 0.9f && spritesReady()) {                       // collapse: the building sinks and fades while the rubble fades in
-          if (const SpriteDef* sp = buildingSprite(bp->type, bp->lvl, age)) { Pt c = iso(bp->x + bp->w / 2.f, bp->y + bp->h / 2.f); float k = fall / 0.9f; drawSprite(*sp, c.x, c.y + k * 14 * cam.zoom, cam.zoom, 1.f - k, 1.f - 0.3f * k); }
+          if (const SpriteDef* sp = buildingSprite(bp->type, bp->lvl, age, B.kind == K_DEFENCE)) { Pt c = iso(bp->x + bp->w / 2.f, bp->y + bp->h / 2.f); float k = fall / 0.9f; drawSprite(*sp, c.x, c.y + k * 14 * cam.zoom, cam.zoom, 1.f - k, 1.f - 0.3f * k); }
         }
         drawRubble(*bp, easeOut((fall - 0.35f) / 0.6f));
       }}); continue;
     }
-    BView v{b.type, b.lvl, b.x, b.y, b.w, b.h, b.hp / b.maxhp, true, false, 0, false, 0};
+    BView v{b.type, b.lvl, b.x, b.y, b.w, b.h, b.hp / b.maxhp, true, false, 0, false, 0}; v.own = B.kind == K_DEFENCE;
     uint32_t bt = (B.kind == K_RIVAL && battleLordColor >= 0) ? lordTintOf(battleLordColor) : 0xffffff;
     items.push_back({dep(b.x + b.w / 2.f, b.y + b.h / 2.f), [v, age, bt] { setSpriteTint(bt); drawBuilding(v, age); setSpriteTint(0xffffff); }});
   }
@@ -713,12 +727,13 @@ static void drawBattle() {
 }
 
 // ============================================================ raid flow
-static void restartGame(bool ascend) {
-  Meta m = S.meta; if (ascend) { m.prestige++; m.points++; }
-  newGame(); S.meta = m; S.seenIntro = false;
+static void restartGame(bool ascend, int civ = -1, int reward = 0) {
+  Meta m = S.meta;
+  if (ascend) { m.prestige++; if (civ >= 0 && civ < NCIV) m.civ = civ; m.boon = (reward >= 1 && reward < NBOON) ? reward : 0; if (reward == REW_OUTLINE) { m.unlocked |= UNLOCK_OUTLINE; m.outlineOn = true; } }
+  newGame(); S.meta = m; S.seenIntro = false; syncCiv();
   replaying = false; recording = false; view = V_HOME; modal = M_NONE; selId = -1; explSel = -1; enemySel = -1; buildMode = false; incoming = false; hasDef = false; dispInit = false; armRestart = armAscend = false; diploEnemy = -1; diploMsg.clear();
   outRep = OutpostReport(); fxClear(); centerCamera(); g_fogDirty = true; g_visDirty = true; saveGame(); modal = M_INTRO; modalScroll = 0;
-  banner(ascend ? "You have ascended - prestige " + std::to_string(S.meta.prestige) : "A new realm begins");
+  banner(ascend ? "You have ascended - prestige " + std::to_string(S.meta.prestige) + " - " + CIVS[S.meta.civ].name : "A new realm begins");
 }
 static void goHome() {
   modal = M_NONE; view = V_HOME; centerCamera(); saveGame(); incoming = false;
@@ -766,6 +781,10 @@ static void finishAttack() {
   B.done = true; Sim& sim = B.sim; int stars = sim.stars(), pct = sim.pct();
   AtkResult r{}; r.kind = B.kind; r.stars = stars; r.pct = pct;
   for (int i = 0; i < U_COUNT; i++) r.surv[i] = usedCount[i];                          // deployed troops are spent: they do not return
+  if (S.meta.boon == BOON_VETERANS) {                                                  // ...unless the Veteran's Return reward is active: survivors march back to the Army Camp
+    int back[U_COUNT] = {}; for (auto& u : sim.units) if (!u.def && u.hp > 0) back[u.type]++;
+    for (int i = 0; i < U_COUNT; i++) { back[i] = std::min(back[i], usedCount[i]); S.army[i] += back[i]; r.surv[i] = usedCount[i] - back[i]; r.ret[i] = back[i]; }
+  }
   for (int k = 0; k < NRES; k++) {
     float full = scout.base.loot.v[k] * (scout.rival ? 0.2f * scout.lootF : campMul(scout.i)); int v = (int)std::floor(full * pct / 100.f);
     int got = std::max(0, std::min(v, (int)(cap() - S.res[k]))); S.res[k] += got; r.got.v[k] = got;
@@ -914,6 +933,19 @@ static void rotButtons(float mx, float my, float mw) {
 }
 static void openRaidChecks() {}
 
+static bool selCard(Flow& f, bool selected, const std::string& title, const std::string& desc, const SpriteDef* prev, uint32_t titleCol = C_TXT) {
+  float pw = prev ? U(112) : 0.f, bw = U(92), gp = U(10), textW = f.maxW - pw - bw - gp * 3 - (prev ? 0.f : U(4));
+  auto lines = wrap(desc, textW, F_S); float lh = G.textSize("Ag", F_S).y + U(2), th = G.textSize("Ag", F_M).y;
+  float rh = std::max(U(72), U(12) + th + std::min<size_t>(lines.size(), 5) * lh + U(6));
+  if (f.x > f.x0) flowNl(f);
+  if (selected) G.rrect(f.x0 - U(2), f.y - U(2), f.maxW + U(4), rh + U(4), U(10), 0xe0b860, 0.95f);
+  G.gradRRect(f.x0, f.y, f.maxW, rh, U(8), selected ? 0x4d3b1f : 0x3a2c20, selected ? 0x33260f : 0x261a12, 0.96f);
+  float x = f.x0 + gp; if (prev) { drawIcon(*prev, x + pw / 2, f.y + rh / 2, pw); x += pw + gp; }
+  G.text(title, x, f.y + U(6), F_M, titleCol); float ty = f.y + U(6) + th + U(2);
+  for (size_t i = 0; i < lines.size() && i < 5; i++) { G.text(lines[i], x, ty, F_S, C_DIM); ty += lh; }
+  bool clicked = uiButton(f.x0 + f.maxW - bw - gp, f.y + (rh - U(34)) / 2, bw, U(34), selected ? "Chosen" : "Choose", selected ? 1 : 0, true, F_S);
+  f.y += rh + U(6); return clicked;
+}
 static int activeSlider = -1; static bool sliderTouched = false;
 static float slider(int id, float x, float y, float w, float v, uint32_t col) {          // horizontal 0..1 slider; returns the new value
   float h = U(36), cy = y + h / 2; SDL_FRect hit{x - U(14), y, w + U(28), h};
@@ -965,7 +997,7 @@ static void drawModal() {
             else toast(idleV() < 1 && assigned() < 1 ? "No villager available" : "Not enough resources");
           }
           float tx0 = f.x0 + U(66);
-          if (spritesReady()) { const SpriteDef* sp = isPiece(t) ? pieceSprite((BType)t, 1, 0, 0) : buildingSprite((BType)t, 1, std::min(ageOf(tcLvl()), 3)); if (sp) drawIcon(*sp, f.x0 + U(33), f.y + rh / 2, U(54), err ? 0.4f : 1.f); }
+          if (spritesReady()) { const SpriteDef* sp = isPiece(t) ? pieceSprite((BType)t, 1, 0, 0) : buildingSprite((BType)t, 1, std::min(ageOf(tcLvl()), 3), true); if (sp) drawIcon(*sp, f.x0 + U(33), f.y + rh / 2, U(54), err ? 0.4f : 1.f); }
           G.text(d.name, tx0, f.y + U(7), F_M, err ? 0x8a8478 : C_TXT);
           G.text(err ? err : d.desc, tx0, f.y + U(32), F_S, err ? C_BAD : C_DIM);
           drawCost(f.x0 + f.maxW - U(10), f.y + U(7), d.cost, A_RIGHT);
@@ -1095,6 +1127,7 @@ static void drawModal() {
       flowPara(f, "Renown " + std::string(atk.dr >= 0 ? "+" : "") + std::to_string(atk.dr) + " -> " + std::to_string(S.renown) + " (" + rankOf(S.renown) + ")", C_TXT);
       std::string sv; for (int i = 0; i < U_COUNT; i++) if (atk.surv[i]) sv += std::string(udef(i).name) + " x" + std::to_string(atk.surv[i]) + "  ";
       flowPara(f, "Troops committed to the battle (they do not come home): " + (sv.empty() ? std::string("none - nothing was lost") : sv), C_DIM);
+      { std::string rt; for (int i = 0; i < U_COUNT; i++) if (atk.ret[i]) rt += std::string(udef(i).name) + " x" + std::to_string(atk.ret[i]) + "  "; if (!rt.empty()) flowPara(f, "Veteran's Return - survivors marched back to your Army Camp: " + rt, C_OK, F_S); }
       if (!S.replays.empty() && flowBtn(f, "Watch replay")) { SDL_RenderSetClipRect(G.r, nullptr); startReplay(0); return; }
       if (flowBtn(f, "Return Home", 1)) goHome(); break;
     }
@@ -1224,15 +1257,32 @@ static void drawModal() {
       if (flowBtn(f, "Close")) modal = M_NONE; break;
     }
     case M_PRESTIGE: {
-      flowTitle(f, "Prestige", C_GOLD);
-      flowPara(f, "Prestige " + std::to_string(S.meta.prestige) + "  -  " + std::to_string(S.meta.points) + " point(s) to spend. Reach the maximum Town Center and you may ascend: your realm starts over and you earn a point for a permanent unlock.", C_TXT);
-      for (int i = 0; i < NPRESTIGE; i++) {
-        float rh = U(60); bool has = prestigeHas(i), can = !has && S.meta.points >= PRESTIGE[i].cost;
-        G.gradRRect(f.x0, f.y, f.maxW, rh, U(8), 0x3a2c20, 0x261a12, 0.9f); G.text(PRESTIGE[i].name, f.x0 + U(10), f.y + U(5), F_M, has ? C_OK : C_TXT); G.text(PRESTIGE[i].desc, f.x0 + U(10), f.y + U(32), F_S, C_DIM);
-        if (uiButton(f.x0 + f.maxW - U(104), f.y + (rh - U(34)) / 2, U(96), U(34), has ? "Unlocked" : "Unlock " + std::to_string(PRESTIGE[i].cost), can ? 1 : 0, can, F_S)) { prestigeBuy(i); saveGame(); }
-        f.y += rh + U(5);
-      }
+      flowTitle(f, "Realm", C_GOLD);
+      flowPara(f, "Prestige " + std::to_string(S.meta.prestige) + ". Reach the maximum Town Center and you may ascend: pick a civilization and one reward, and your realm starts over in a new world.", C_TXT, F_S);
+      flowText(f, "Civilization:", C_DIM, F_S); flowText(f, CIVS[clampi(S.meta.civ, 0, NCIV - 1)].name, C_GOLD, F_M); flowNl(f);
+      flowPara(f, CIVS[clampi(S.meta.civ, 0, NCIV - 1)].desc, C_DIM, F_S);
+      if (S.meta.boon > 0) { flowText(f, "Reward for this realm:", C_DIM, F_S); flowText(f, BOONS[S.meta.boon].name, C_OK, F_M); flowNl(f); flowPara(f, BOONS[S.meta.boon].desc, C_DIM, F_S); }
+      else flowPara(f, "No reward is active yet - you choose one each time you ascend.", C_DIM, F_S);
+      flowTitle(f, "Golden Banners", C_GOLD, F_M);
+      if (outlineOwned()) { flowPara(f, "A thin gold outline around your buildings and units.", C_DIM, F_S); if (flowBtn(f, std::string("Gold outline: ") + (S.meta.outlineOn ? "ON" : "OFF"), S.meta.outlineOn ? 1 : 0)) { S.meta.outlineOn = !S.meta.outlineOn; saveGame(); } }
+      else flowPara(f, "Locked. It is offered as a reward when you ascend for the second time.", C_DIM, F_S);
+      flowNl(f);
       if (flowBtn(f, "Back")) { modal = M_SETTINGS; modalScroll = 0; } break;
+    }
+    case M_ASCEND: {
+      flowTitle(f, "Ascend", C_GOLD);
+      flowPara(f, "Your realm starts over from Town Center 1 in a brand new world. Prestige " + std::to_string(S.meta.prestige) + " becomes " + std::to_string(S.meta.prestige + 1) + ". Choose how your village will look and one reward.", C_TXT, F_S);
+      flowTitle(f, "Civilization", C_GOLD, F_M);
+      flowPara(f, "Civilizations are cosmetic: each has its own architecture for houses, Town Center, barracks, castles and more.", C_DIM, F_S);
+      for (int i = 0; i < NCIV; i++) { char pn[24]; std::snprintf(pn, sizeof pn, "civprev_%s", i == 0 ? "by" : CIVS[i].code); if (selCard(f, ascCiv == i, std::string(CIVS[i].name) + (i == S.meta.civ ? "   (current)" : ""), CIVS[i].desc, spritesReady() ? findSprite(pn) : nullptr)) { ascCiv = i; armAscend = false; } }
+      flowTitle(f, "Reward", C_GOLD, F_M);
+      flowPara(f, "Pick one. The boons last for the whole new realm; the Golden Banners are yours for good.", C_DIM, F_S);
+      if (outlineChoiceOpen(S.meta.prestige + 1)) { if (selCard(f, ascReward == REW_OUTLINE, "Golden Banners", "Your units and buildings gain a thin gold outline, permanently. Can be switched off in Options. Offered once, from your second ascension.", nullptr, C_GOLD)) { ascReward = REW_OUTLINE; armAscend = false; } }
+      for (int bn = 1; bn < NBOON; bn++) if (selCard(f, ascReward == bn, BOONS[bn].name, BOONS[bn].desc, nullptr)) { ascReward = bn; armAscend = false; }
+      bool okA = ascReward != 0;
+      if (!okA) flowPara(f, "Choose a reward to continue.", C_BAD, F_S);
+      if (flowBtn(f, armAscend ? "Tap again: begin the new realm" : "Begin the new realm", armAscend ? 2 : 1, okA)) { if (armAscend) { restartGame(true, ascCiv, ascReward); SDL_RenderSetClipRect(G.r, nullptr); return; } armAscend = true; }
+      if (flowBtn(f, "Back")) { modal = M_SETTINGS; modalScroll = 0; armAscend = false; } break;
     }
     case M_SETTINGS: {
       flowTitle(f, "Options", C_TXT);
@@ -1248,12 +1298,13 @@ static void drawModal() {
       flowPara(f, "Season " + std::to_string(S.season) + " ends in " + fmtTime(seasonLeft()) + ". The music plays from files on your device and the effects are generated; the game never goes online.", C_DIM, F_S);
       flowPara(f, "Controls: drag = pan, wheel / pinch = zoom, tap = select / place / deploy. Dev keys: F1 resources, F2 raid, F3 town center level, F4 end the season.", C_DIM, F_S);
       flowTitle(f, "Realm", C_GOLD, F_M);
-      flowPara(f, "Prestige " + std::to_string(S.meta.prestige) + "  -  " + std::to_string(S.meta.points) + " point(s). " + (prestigeAvailable() ? "Your Town Center is at the maximum level: you may ascend." : "Reach Town Center Lv" + std::to_string(MAXTC) + " to ascend."), C_DIM, F_S);
-      if (flowBtn(f, "Prestige rewards")) { modal = M_PRESTIGE; modalScroll = 0; }
-      if (flowBtn(f, armAscend ? "Tap again to ascend (start over, +1 point)" : "Ascend (prestige)", armAscend ? 2 : 1, prestigeAvailable())) { if (armAscend) { restartGame(true); SDL_RenderSetClipRect(G.r, nullptr); return; } armAscend = true; armRestart = false; }
+      flowPara(f, "Prestige " + std::to_string(S.meta.prestige) + "  -  " + CIVS[clampi(S.meta.civ, 0, NCIV - 1)].name + (S.meta.boon > 0 ? std::string("  -  ") + BOONS[S.meta.boon].name : std::string()) + ". " + (prestigeAvailable() ? "Your Town Center is at the maximum level: you may ascend." : "Reach Town Center Lv" + std::to_string(MAXTC) + " to ascend."), C_DIM, F_S);
+      if (flowBtn(f, "Realm and rewards")) { modal = M_PRESTIGE; modalScroll = 0; }
+      if (flowBtn(f, "Ascend (prestige)", 1, prestigeAvailable())) { modal = M_ASCEND; modalScroll = 0; ascCiv = S.meta.civ; ascReward = 0; armAscend = false; armRestart = false; SDL_RenderSetClipRect(G.r, nullptr); return; }
+      if (outlineOwned() && flowBtn(f, std::string("Gold outline: ") + (S.meta.outlineOn ? "ON" : "OFF"), S.meta.outlineOn ? 1 : 0)) { S.meta.outlineOn = !S.meta.outlineOn; saveGame(); }
       flowNl(f);
       if (flowBtn(f, armRestart ? "Tap again: erase everything and start over" : "Restart the game", armRestart ? 2 : 0)) { if (armRestart) { restartGame(false); SDL_RenderSetClipRect(G.r, nullptr); return; } armRestart = true; armAscend = false; }
-      flowPara(f, "Restart returns you to Town Center 1 in a brand new world with new rival lords. Prestige points and unlocks are kept.", C_DIM, F_S);
+      flowPara(f, "Restart returns you to Town Center 1 in a brand new world with new rival lords. Prestige, civilization, rewards and unlocks are kept.", C_DIM, F_S);
       if (flowBtn(f, "Close", 1)) modal = M_NONE; break;
     }
     default: break;
@@ -1273,7 +1324,7 @@ static void drawPanel() {
   const BDef& d = bdef(b->type);
   float w = std::min(U(440), G.W - U(16)), x = (G.W - w) / 2, hh = panelContentH + U(24), y = G.H - U(94) - hh;
   panelBox(x, y, w, hh, 0, 0.97f); block(x, y - U(40), w, hh + U(40));
-  if (spritesReady()) { const SpriteDef* psp = isPiece(b->type) ? pieceSprite(b->type, isPiece(b->type) ? (b->type == B_SPIKE || b->type == B_OIL ? S.trapLvl : S.wallLvl) : b->lvl, b->x, b->y) : buildingSprite(b->type, std::max(1, b->lvl), std::min(ageOf(tcLvl()), 3)); if (psp) drawIcon(*psp, x + w - U(78), y + U(34), U(76)); }
+  if (spritesReady()) { const SpriteDef* psp = isPiece(b->type) ? pieceSprite(b->type, isPiece(b->type) ? (b->type == B_SPIKE || b->type == B_OIL ? S.trapLvl : S.wallLvl) : b->lvl, b->x, b->y) : buildingSprite(b->type, std::max(1, b->lvl), std::min(ageOf(tcLvl()), 3), true); if (psp) drawIcon(*psp, x + w - U(78), y + U(34), U(76)); }
   { float xs = U(28); if (uiButton(x + w - xs - U(8), y + U(8), xs, xs, "X", 2, true, F_M)) { selId = -1; return; } }
   Flow f = flowAt(x + U(16), y + U(14), w - U(32));
   if (isPiece(b->type)) {
@@ -1609,7 +1660,7 @@ static void spawnEventFx(const SimEvent& e) {
   }
 }
 static void updateWorld(float dt) {
-  frameDt = dt;
+  frameDt = dt; syncCiv();
   if (toastT > 0) toastT -= dt;
   if (bannerT > 0) bannerT -= dt;
   if (modal != M_SETTINGS) armRestart = armAscend = false;
@@ -2013,7 +2064,7 @@ static int smoke() {
       saveGame(); Enemy sv = S.enemies[0]; S.enemies.clear(); bool lg = loadGame(); LOG("load: %d, enemies %d name '%s' vs '%s' seed %u vs %u tc %d vs %d", (int)lg, (int)S.enemies.size(), S.enemies.empty() ? "" : S.enemies[0].name.c_str(), sv.name.c_str(), S.enemies.empty() ? 0u : S.enemies[0].seed, sv.seed, S.enemies.empty() ? 0 : S.enemies[0].tc, sv.tc); CHECK(lg && S.enemies.size() >= 1 && S.enemies[0].name == sv.name && S.enemies[0].seed == sv.seed && S.enemies[0].tc == sv.tc, "rival lords are saved");
       { std::ifstream sf("smoke_save.txt", std::ios::binary); std::string txt((std::istreambuf_iterator<char>(sf)), std::istreambuf_iterator<char>()); sf.close();
         size_t rp = txt.find("RPL "); size_t cut = rp == std::string::npos ? std::string::npos : txt.rfind('\n', txt.rfind('\n', rp) - 1);
-        CHECK(txt.compare(0, 5, "DOK13") == 0 && cut != std::string::npos, "the save is the current version");
+        CHECK(txt.compare(0, 5, "DOK14") == 0 && cut != std::string::npos, "the save is the current version");
         if (cut != std::string::npos) { std::string old = "DOK6" + txt.substr(5, cut + 1 - 5); std::ofstream of("smoke_old.txt", std::ios::binary | std::ios::trunc); of << old; of.close(); std::string keep = g_savePath; g_savePath = "smoke_old.txt";
           bool okOld = loadGame(); g_savePath = keep; CHECK(okOld && S.enemies.size() >= 1 && S.replays.empty() && S.fog.size() == (size_t)WORLD * WORLD, "a save from before the four quadrants loads and gets a rival lord"); } }
       Pt c0 = iso(15.f, 15.f); (void)c0;
@@ -2157,10 +2208,48 @@ static int smoke() {
   { diploEnemy = S.enemies[0].id; diploMsg = "Lord X considers your offer..."; modal = M_DIPLO; frames(10); shot("50_diplomacy"); modal = M_NONE;
     S.relics.push_back({S.aid++, 6.5f, 20.5f}); { float gx = 6.5f, gy = 20.5f, zm = 2.0f; cam.zoom = cam.zt = zm; cam.x = G.W / 2.f - (gx - gy) * TW / 2 * zm; cam.y = G.H / 2.f - (gx + gy) * TH / 2 * zm; cam.vx = cam.vy = 0; } frames(6); shot("51_relic"); centerCamera(); }
   {   // restart and prestige
-    S.meta.points = 3; int pr0 = S.meta.prestige; tcB().lvl = MAXTC; CHECK(prestigeAvailable(), "prestige opens at the maximum Town Center"); tcB().lvl = 5; CHECK(!prestigeAvailable(), "and not before");
-    restartGame(true); CHECK(S.meta.prestige == pr0 + 1 && S.meta.points == 4 && tcLvl() == 1 && S.enemies.size() == 1 && S.enemies[0].tc == 1 && !S.seenIntro && modal == M_INTRO, "ascending starts a new realm and keeps prestige");
-    CHECK(prestigeBuy(0) && prestigeHas(0) && S.meta.points == 3 && !prestigeBuy(0), "points buy a permanent unlock"); int q0 = S.enemies[0].quad;
-    restartGame(false); CHECK(S.meta.prestige == pr0 + 1 && prestigeHas(0) && tcLvl() == 1 && S.enemies.size() == 1 && S.b.size() == 3, "a plain restart keeps prestige but resets everything else"); LOG("restart: rival quadrant %d -> %d", q0, S.enemies[0].quad);
+    int pr0 = S.meta.prestige; tcB().lvl = MAXTC; CHECK(prestigeAvailable(), "prestige opens at the maximum Town Center"); tcB().lvl = 5; CHECK(!prestigeAvailable(), "and not before");
+    { // every civilization: sprites load, the village is drawn in its style, and the choice survives save/load
+      static const char* CODES[7] = {"", "sl", "fr", "ce", "ja", "sp", "mo"};
+      for (int k = 1; k < NCIV; k++) {
+        S.meta.civ = k; syncCiv(); char nm[40]; std::snprintf(nm, sizeof nm, "%s_townhall_5", CODES[k]);
+        CHECK(civSpritesLoaded(CODES[k]) && findSprite(nm) != nullptr && buildingSprite(B_TOWNHALL, 5, 2, true) == findSprite(nm) && buildingSprite(B_TOWNHALL, 5, 2, false) == findSprite("townhall_5"), "the civilization's own Town Center sprite is used for the player only");
+        CHECK(buildingSprite(B_LUMBER, 1, 1, true) == findSprite("lumber_1") && buildingSprite(B_HOUSE, 1, 1, true) == findSprite((std::string(CODES[k]) + "_house_1").c_str()), "buildings without a civ variant keep the stock sprite");
+        centerCamera(); frames(8); shot((std::string("civ_") + CIVS[k].name).c_str());
+        if (k == 1) { saveGame(); S.meta.civ = 0; CHECK(loadGame() && S.meta.civ == 1, "the chosen civilization is saved"); }
+      }
+      S.meta.civ = 0; syncCiv(); CHECK(!civSpritesLoaded("mo") && !civSpritesLoaded("sl") && findSprite("mo_townhall_5") == nullptr, "leaving a civilization frees its sprites"); frames(4);
+    }
+    restartGame(true, 4, BOON_HARDY); CHECK(S.meta.prestige == pr0 + 1 && S.meta.civ == 4 && S.meta.boon == BOON_HARDY && tcLvl() == 1 && S.enemies.size() == 1 && S.enemies[0].tc == 1 && !S.seenIntro && modal == M_INTRO, "ascending starts a new realm, keeps prestige and applies the chosen civ and reward");
+    CHECK(civSpritesLoaded("ja") && !outlineOwned() && outlineChoiceOpen(S.meta.prestige + 1), "the gold outline is still on offer for the next ascension"); int q0 = S.enemies[0].quad;
+    restartGame(false); CHECK(S.meta.prestige == pr0 + 1 && S.meta.civ == 4 && S.meta.boon == BOON_HARDY && tcLvl() == 1 && S.enemies.size() == 1 && S.b.size() == 3, "a plain restart keeps prestige, civ and reward but resets everything else"); LOG("restart: rival quadrant %d -> %d", q0, S.enemies[0].quad);
+    {   // the rewards
+      S.meta.boon = BOON_NONE; CHECK(std::fabs(gatherMul(WOOD) - 1.f) < 1e-4f, "no reward, no bonus"); S.meta.boon = BOON_PROSPER; CHECK(std::fabs(gatherMul(WOOD) - 1.75f) < 1e-4f && std::fabs(gatherMul(FOOD) - 1.75f) < 1e-4f, "Bountiful Lands: +75% production");
+      Enemy tmp = S.enemies[0]; tmp.pers = 1; tmp.trust = 0; tmp.tc = tcLvl(); S.meta.boon = BOON_NONE; float c0 = diploChance(tmp, DP_PEACE), a0 = diploChance(tmp, DP_ALLY); S.meta.boon = BOON_DIPLOMAT; float c1 = diploChance(tmp, DP_PEACE), a1 = diploChance(tmp, DP_ALLY);
+      CHECK(c1 >= c0 + 0.25f && a1 >= a0 + 0.25f, "Silver Tongue: diplomacy is much easier"); LOG("diplomacy chance peace %.2f -> %.2f, ally %.2f -> %.2f", c0, c1, a0, a1);
+      S.enemies[0].stance = ST_PEACE; S.enemies[0].talkAt = S.t + 1000; CHECK(diploBlock(S.enemies[0], DP_ALLY) == nullptr, "Silver Tongue: alliance straight after peace, no cooldown"); S.enemies[0].stance = ST_WAR; S.enemies[0].talkAt = 0;
+      // hardy villagers beat a wolf one on one
+      S.meta.boon = BOON_HARDY; { auto savedA = S.animals; S.animals.clear(); S.expl.clear(); S.villagers = 3; S.res[FOOD] = 500;
+        CHECK(sendExplorer(true), "a villager can be sent out"); Explorer& v = S.expl.back(); v.x = v.tx = 70.f; v.y = v.ty = 40.f; v.go = false; int vid = v.id;
+        Animal w{}; w.hp = w.maxHp = 80.f; w.id = S.aid++; w.type = A_WOLF; w.x = w.hx = w.tx = 70.8f; w.y = w.hy = w.ty = 40.f; w.food = w.maxFood = 90; w.alive = true; S.animals.push_back(w); int wid = w.id;
+        for (int i = 0; i < 400; i++) { S.t += 0.05; econTick(0.05f); } Explorer* ve = findExplorer(vid); Animal* wa = nullptr; for (auto& a : S.animals) if (a.id == wid) wa = &a;
+        CHECK(ve != nullptr && wa != nullptr && !wa->alive, "Hardy Villagers: one villager beats a wolf one on one"); LOG("villager hp %.0f / %.0f", ve ? ve->hp : -1.f, ve ? ve->maxHp : -1.f);
+        S.meta.boon = BOON_NONE; S.expl.clear(); Explorer v2{}; v2.id = S.aid++; int v2id = v2.id; v2.vill = true; v2.x = v2.tx = 70.f; v2.y = v2.ty = 40.f; v2.face = 3; S.expl.push_back(v2); S.animals.clear(); Animal w2 = w; w2.id = S.aid++; w2.hp = 80.f; w2.alive = true; w2.x = w2.hx = w2.tx = 70.8f; w2.y = w2.hy = w2.ty = 40.f; S.animals.push_back(w2); size_t nv = S.expl.size();
+        for (int i = 0; i < 400; i++) { S.t += 0.05; econTick(0.05f); } { Explorer* v2p = findExplorer(v2id); CHECK(S.animals[0].alive && nv == 1 && (!v2p || v2p->hp < v2p->maxHp), "an ordinary villager is no match for a wolf"); } S.animals = savedA; S.expl.clear(); S.villagers = 3; }
+      // Veteran's Return: survivors come home
+      S.meta.boon = BOON_VETERANS; S.army[U_MILITIA] = 0; startBarb(1); beginBattle(); S.army[U_MILITIA] = 6; B.sel = U_MILITIA; for (int i = 0; i < 5; i++) deployRec(U_MILITIA, -2.f + i * 0.5f, 15.f), S.army[U_MILITIA]--; int left0 = S.army[U_MILITIA]; for (auto& sb : B.sim.b) sb.dead = true; B.sim.over = true; finishAttack();
+      CHECK(S.army[U_MILITIA] == left0 + 5 && atk.ret[U_MILITIA] == 5, "Veteran's Return: surviving troops march back to the army camp"); goHome();
+      S.meta.boon = BOON_NONE; S.army[U_MILITIA] = 0; startBarb(1); beginBattle(); S.army[U_MILITIA] = 6; B.sel = U_MILITIA; for (int i = 0; i < 5; i++) deployRec(U_MILITIA, -2.f + i * 0.5f, 15.f), S.army[U_MILITIA]--; for (auto& sb : B.sim.b) sb.dead = true; B.sim.over = true; finishAttack(); CHECK(S.army[U_MILITIA] == 1 && atk.ret[U_MILITIA] == 0, "without the reward troops are spent as before"); goHome();
+      S.meta.boon = BOON_HARDY;
+    }
+    {   // second ascension: the gold outline
+      CHECK(outlineChoiceOpen(2) && !outlineChoiceOpen(1), "Golden Banners appear as a choice from the second ascension"); restartGame(true, 5, REW_OUTLINE);
+      CHECK(S.meta.prestige == pr0 + 2 && outlineOwned() && S.meta.outlineOn && S.meta.civ == 5 && S.meta.boon == BOON_NONE, "choosing the Golden Banners unlocks the outline for good"); frames(6); CHECK(outlineIsEnabled() && civSpritesLoaded("sp"), "the outline textures are built and the new civ is loaded");
+      modal = M_NONE; S.res[WOOD] = S.res[FOOD] = S.res[GOLD] = S.res[STONE] = 800; addB(B_HOUSE, 6, 6, 1); addB(B_BARRACKS, 10, 6, 1); S.villagers = 3; { float gx = 8.f, gy = 8.f, zm = 1.8f; cam.zoom = cam.zt = zm; cam.x = G.W / 2.f - (gx - gy) * TW / 2 * zm; cam.y = G.H / 2.f - (gx + gy) * TH / 2 * zm; cam.vx = cam.vy = 0; } frames(8); shot("53_gold_outline"); centerCamera();
+      S.meta.outlineOn = false; frames(4); CHECK(!outlineIsEnabled(), "the outline can be switched off"); S.meta.outlineOn = true; frames(4);
+      restartGame(true, 0, BOON_PROSPER); CHECK(S.meta.prestige == pr0 + 3 && outlineOwned() && S.meta.civ == 0 && S.meta.boon == BOON_PROSPER && !outlineChoiceOpen(4), "the outline is offered only once; picking the Byzantines again works"); frames(4);
+      modal = M_ASCEND; ascCiv = 3; ascReward = BOON_DIPLOMAT; frames(10); shot("54_ascend"); modal = M_NONE;
+    }
     modal = M_PRESTIGE; frames(10); shot("48_prestige"); modal = M_SETTINGS; frames(10); shot("49_options"); modal = M_NONE;
   }
   LOG("SMOKE %s (%d failures)", fails ? "FAILED" : "PASSED", fails); if (smokeLog) std::fclose(smokeLog); return fails ? 2 : 0;

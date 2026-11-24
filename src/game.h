@@ -19,7 +19,7 @@ struct Relic { int id; float x, y; };
 struct SqUnit { int type; float hp; };
 enum SquadMode { SQ_FREE, SQ_ESCORT, SQ_GUARD, SQ_ATTACK };
 struct Squad { int id = 0; std::vector<SqUnit> u; float x = 0, y = 0, tx = 0, ty = 0; bool go = false, recall = false; int mode = SQ_FREE, target = -1; float gx = 0, gy = 0, aph = 0, fight = 0; int face = 3; };
-struct Meta { int prestige = 0, points = 0; uint32_t unlocked = 0; };    // survives restarts
+struct Meta { int prestige = 0, points = 0; uint32_t unlocked = 0; int civ = 0, boon = 0; bool outlineOn = false; };    // survives restarts (unlocked bit 0 = gold outline owned; civ 0 = Byzantines; boon = reward for this realm)
 enum Stance { ST_WAR, ST_PEACE, ST_TRADE, ST_ALLY };
 enum Proposal { DP_PEACE, DP_TRADE, DP_ALLY };
 struct Chest { int x, y; Cost c; bool taken; };
@@ -194,12 +194,18 @@ float squadHpFrac(const Squad& s);
 bool isVisible(int x, int y);
 extern bool g_visDirty;
 Base enemyBaseAt(const Enemy& e, int tc, size_t deadCount, std::vector<int>* srcIdx = nullptr);
-struct PrestigeDef { const char* name; const char* desc; int cost; };
-constexpr int NPRESTIGE = 8;
-extern const PrestigeDef PRESTIGE[NPRESTIGE];
+// ---- civilizations (cosmetic building styles) and the rewards chosen when you ascend
+constexpr int NCIV = 7;
+struct CivDef { const char* code; const char* name; const char* desc; };
+extern const CivDef CIVS[NCIV];                                 // 0 = Byzantines, the default look
+enum Boon { BOON_NONE, BOON_PROSPER, BOON_VETERANS, BOON_DIPLOMAT, BOON_HARDY, NBOON };
+struct BoonDef { const char* name; const char* desc; };
+extern const BoonDef BOONS[NBOON];
+constexpr uint32_t UNLOCK_OUTLINE = 1u;
+bool outlineOwned();
+bool outlineChoiceOpen(int prestigeAfter);                      // the gold outline is offered from the second ascension, once
+const char* civCode(int civ);                                   // "" for the Byzantines (stock sprites)
 bool prestigeAvailable();                                      // Town Center at the maximum level
-bool prestigeHas(int i);
-bool prestigeBuy(int i);
 // ---- barbarian camps ----
 float campMul(int camp);                 // loot multiplier: 1, then 0.5, 0.25, 0.1 for repeated clears
 int campsUnlocked();

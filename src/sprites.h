@@ -10,6 +10,13 @@ void setEnemyTeamColor(uint32_t rgb);   // recolours the 'red team' unit sprites
 void setSpriteTint(uint32_t rgb);   // colour multiplier for the following drawSprite calls (0xffffff = none)
 bool loadSprites();                 // false => game falls back to the flat-shaded renderer
 bool spritesReady();
+// ---- civilizations (cosmetic building sets) and the gold outline
+bool loadCivSprites(const char* code, int slot);   // slot 1..6; loads assets/civ_<code>.txt (sprites named <code>_house_1 ...)
+void unloadCivSprites(const char* code);
+bool civSpritesLoaded(const char* code);
+void setOutlineEnabled(bool on);                    // builds / frees the silhouette textures
+bool outlineIsEnabled();
+void setSpriteOutline(bool mark);                   // when on, drawSprite adds a gold outline (only while the option is enabled)
 const SpriteDef* findSprite(const std::string& name);
 // Draw so the sprite's ground anchor lands on screen point (sx,sy); zoom = world zoom.  A half-resolution copy is used when zoomed out (no shimmer).
 void drawSprite(const SpriteDef& s, float sx, float sy, float zoom, float alpha = 1.f, float scaleMul = 1.f);
