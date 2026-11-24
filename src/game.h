@@ -19,6 +19,7 @@ struct Relic { int id; float x, y; };
 struct SqUnit { int type; float hp; };
 enum SquadMode { SQ_FREE, SQ_ESCORT, SQ_GUARD, SQ_ATTACK };
 struct Squad { int id = 0; std::vector<SqUnit> u; float x = 0, y = 0, tx = 0, ty = 0; bool go = false, recall = false; int mode = SQ_FREE, target = -1; float gx = 0, gy = 0, aph = 0, fight = 0; int face = 3; };
+struct Grudge { std::string name; int enemyId = -1, tc = 1; uint32_t seed = 0; int civ = 0, color = 0; };   // someone who raided you: you may attack their base (revenge)
 struct Meta { int prestige = 0, points = 0; uint32_t unlocked = 0; int civ = 0, boon = 0; bool outlineOn = false; };    // survives restarts (unlocked bit 0 = gold outline owned; civ 0 = Byzantines; boon = reward for this realm)
 enum Stance { ST_WAR, ST_PEACE, ST_TRADE, ST_ALLY };
 enum Proposal { DP_PEACE, DP_TRADE, DP_ALLY };
@@ -29,7 +30,7 @@ struct RDeploy { int step, type; float x, y; };
 struct RUnit { int type; bool def; float x, y; };
 struct Replay {
   int kind = 0;                        // 0 raid on a barbarian camp, 1 raid on a rival lord, 2 defence of the village, 3 defence of an outpost
-  std::string title, who; int stars = 0, pct = 0, dr = 0; bool win = false; int tcMine = 1, tcEnemy = 1, tcBuild = 1; long long when = 0; Cost loot; int lordColor = -1;
+  std::string title, who; int stars = 0, pct = 0, dr = 0; bool win = false; int tcMine = 1, tcEnemy = 1, tcBuild = 1; long long when = 0; Cost loot; int lordColor = -1, lordCiv = 0;
   bool defence = false; float dt = 1.f / 60.f; int reserve0 = 0, endStep = -1;
   std::vector<SimB> b; std::vector<RUnit> units; std::vector<Spawn> sq; SideMul mul[2]; std::vector<RDeploy> deploys;
 };
@@ -46,6 +47,7 @@ void replayRun(const Replay& r, int& stars, int& pct, int maxSteps = 400000);
 struct Enemy { int id = 0, quad = 1, tc = 1, pers = 0; std::string name; uint32_t seed = 1; double nextLvl = 0; std::vector<int> dead;
   int stance = ST_WAR; float trust = 0; double talkAt = 0;                      // diplomacy
   int color = 0;                                                                  // lord colour (index into LORD_COL), kept until he is defeated
+  int civ = 0;                                                                    // his civilization (index into CIVS): the look of his buildings
   bool seen = false; int seenTc = 0; size_t seenDead = 0; bool visNow = false; float tacc[NRES] = {};   // last seen state of the base (fog of war memory)
 };
 struct Report { std::string who; int stars, pct; Cost stolen; int dr; bool held; int atkTc = 0, diff = 0; bool ruined = false; int lostB = 0, lostV = 0, lostU = 0; };
@@ -67,6 +69,7 @@ struct State {
   int patchX[3] = {-1, -1, -1}, patchY[3] = {-1, -1, -1}, patchN[3] = {0, 0, 0};   // where depleted deposits regrow
   int aid = 1;
   std::vector<Squad> squads;
+  std::vector<Grudge> grudges;
   Meta meta; std::vector<Relic> relics; int relicsHeld = 0, betrayals = 0; double relicCheck = 0; std::vector<uint8_t> vis;   // vis: tiles you can currently see (not saved)
   std::vector<Enemy> enemies; double enemyCheck = 0;   // rival lords on the map (quadrant 1..3; yours is 0)
   std::deque<Replay> replays;                    // newest first, at most 10

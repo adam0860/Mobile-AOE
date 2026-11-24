@@ -149,6 +149,7 @@ static void spawnEnemy(int quad, int tc) {
   Rng r(S.seed ^ (uint32_t)(e.id * 7919) ^ (uint32_t)(S.t * 3)); e.name = std::string(LORD_FIRST[(int)(r.next() * 30)]) + " " + LORD_TITLE[(int)(r.next() * 10)];
   e.seed = (uint32_t)(r.next() * 4e9); e.pers = genBase(e.seed, e.tc, false, 0).pers; e.nextLvl = S.t + enemyLevelTime(e.tc);
   { bool used[NLORDCOL] = {}; for (auto& o : S.enemies) if (o.color >= 0 && o.color < NLORDCOL) used[o.color] = true; std::vector<int> fr; for (int c = 0; c < NLORDCOL; c++) if (!used[c]) fr.push_back(c); e.color = fr.empty() ? (int)(r.next() * NLORDCOL) % NLORDCOL : fr[(size_t)(r.next() * fr.size()) % fr.size()]; }     // a colour no living lord has; kept until he is defeated
+  e.civ = (int)(r.next() * NCIV) % NCIV;                                  // and a random civilization
   e.stance = (e.pers == 1 || e.pers == 3) ? ST_WAR : ST_PEACE;          // Raiders and Warlords start at war with you, Turtles and Merchants keep the peace
   S.enemies.push_back(e);
 }
@@ -787,6 +788,7 @@ Sim makeDefenceSim() {
     for (int i = 0; i < n; i++) { UType t = tierUnit(al.tc, i); if (t == U_RAM || t == U_TREBUCHET || t == U_BOMBARD) t = U_LONGSWORD; float a = (float)(r.next() * 6.2831853), d = 4.f + (float)r.next() * 4.f; sim.deploy(t, c + std::cos(a) * d, c + std::sin(a) * d, true); }
   }
   sim.spawnGarrisons();
+  if (sim.atkEnemy < 0) sim.atkColor = (int)(r.next() * NLORDCOL) % NLORDCOL;          // raiders sent by an unnamed lord get a random colour too
   return sim;
 }
 // Raiders hit a cluster of buildings outside the home area. Resolved instantly with the normal battle sim; what is destroyed is lost for good.
@@ -854,6 +856,12 @@ Report applyDefence(const Sim& sim) {
   }
   rp.held = rp.stars <= 1; if (rp.held) S.sDef++;
   rp.atkTc = sim.atkTc; rp.diff = sim.atkDiff;
+  {   // whoever raided you can be attacked in return (Raid menu > Revenge)
+    Grudge gr; gr.name = rp.who; gr.enemyId = sim.atkEnemy; gr.tc = sim.atkTc;
+    if (Enemy* ae = findEnemy(sim.atkEnemy)) { gr.civ = ae->civ; gr.color = ae->color; gr.tc = ae->tc; } else { gr.enemyId = -1; gr.seed = (uint32_t)std::rand() * 2654435761u + (uint32_t)S.t; gr.civ = (int)(gr.seed % NCIV); gr.color = sim.atkColor >= 0 ? sim.atkColor : (int)((gr.seed >> 8) % NLORDCOL); }
+    for (auto it = S.grudges.begin(); it != S.grudges.end();) { if (it->name == gr.name || (gr.enemyId >= 0 && it->enemyId == gr.enemyId)) it = S.grudges.erase(it); else ++it; }
+    S.grudges.insert(S.grudges.begin(), gr); if (S.grudges.size() > 8) S.grudges.resize(8);
+  }
   int dr = rp.held ? std::max(1, roundi(0.5 * 40 * (1 - E) * winFactor(rp.diff))) : -std::max(1, roundi(0.5 * 40 * E * loseFactor(rp.diff)));
   int before = S.renown; S.renown = std::max(0, S.renown + dr); rp.dr = S.renown - before;
   S.shieldUntil = S.t + shieldSeconds(tcLvl(), rp.stars); S.nextRaid = S.t + 200 + std::rand() % 120;
@@ -892,7 +900,7 @@ static std::string savePath() {
 void saveGame() {
   S.lastSeen = (long long)std::time(nullptr);
   std::ostringstream o; o.precision(9);
-  o << "DOK14 " << S.t << ' ' << S.villagers << ' ' << S.renown << ' ' << S.shieldUntil << ' ' << S.nextRaid << ' ' << S.nid << ' ' << S.seed << ' ' << S.rivalSeq << ' ' << (int)S.seenIntro << ' ' << S.lastSeen << '\n';
+  o << "DOK15 " << S.t << ' ' << S.villagers << ' ' << S.renown << ' ' << S.shieldUntil << ' ' << S.nextRaid << ' ' << S.nid << ' ' << S.seed << ' ' << S.rivalSeq << ' ' << (int)S.seenIntro << ' ' << S.lastSeen << '\n';
   for (int i = 0; i < NRES; i++) o << S.res[i] << ' '; o << '\n';
   o << (int)U_COUNT << ' '; for (int i = 0; i < U_COUNT; i++) o << S.army[i] << ' '; o << '\n';
   o << NCAMP << ' '; for (int i = 0; i <= NCAMP; i++) o << S.camp[i] << ' '; for (int i = 0; i <= NCAMP; i++) o << S.campWins[i] << ' '; o << '\n';
@@ -911,7 +919,7 @@ void saveGame() {
   o << S.expl.size() << '\n'; for (auto& e : S.expl) o << e.id << ' ' << (int)e.vill << ' ' << e.x << ' ' << e.y << ' ' << e.tx << ' ' << e.ty << ' ' << (int)e.go << ' ' << (int)e.recall << ' ' << (int)e.autoX << ' ' << (int)e.monk << ' ' << (int)e.carry << '\n';
   o << S.replays.size() << '\n';
   for (auto& r : S.replays) {
-    o << "RPL " << r.kind << ' ' << (int)r.win << ' ' << r.stars << ' ' << r.pct << ' ' << r.dr << ' ' << r.tcMine << ' ' << r.tcEnemy << ' ' << r.tcBuild << ' ' << (int)r.defence << ' ' << r.reserve0 << ' ' << r.endStep << ' ' << r.dt << ' ' << r.when << ' ' << r.lordColor;
+    o << "RPL " << r.kind << ' ' << (int)r.win << ' ' << r.stars << ' ' << r.pct << ' ' << r.dr << ' ' << r.tcMine << ' ' << r.tcEnemy << ' ' << r.tcBuild << ' ' << (int)r.defence << ' ' << r.reserve0 << ' ' << r.endStep << ' ' << r.dt << ' ' << r.when << ' ' << r.lordColor << ' ' << r.lordCiv;
     for (int k = 0; k < NRES; k++) o << ' ' << r.loot.v[k];
     for (int i = 0; i < 2; i++) o << ' ' << r.mul[i].melee << ' ' << r.mul[i].ranged << ' ' << r.mul[i].siege << ' ' << r.mul[i].hp;
     o << '\n' << r.title << '\n' << r.who << '\n';
@@ -921,19 +929,20 @@ void saveGame() {
     o << r.deploys.size() << '\n'; for (auto& d : r.deploys) o << d.step << ' ' << d.type << ' ' << d.x << ' ' << d.y << '\n';
   }
   o << S.enemyCheck << ' ' << S.enemies.size() << '\n';
-  for (auto& e : S.enemies) { o << e.id << ' ' << e.quad << ' ' << e.tc << ' ' << e.pers << ' ' << e.seed << ' ' << e.nextLvl << ' ' << e.dead.size(); for (int d : e.dead) o << ' ' << d; o << '\n' << e.name << '\n' << e.stance << ' ' << e.trust << ' ' << e.talkAt << ' ' << (int)e.seen << ' ' << e.seenTc << ' ' << e.seenDead << ' ' << e.color << '\n'; }
+  for (auto& e : S.enemies) { o << e.id << ' ' << e.quad << ' ' << e.tc << ' ' << e.pers << ' ' << e.seed << ' ' << e.nextLvl << ' ' << e.dead.size(); for (int d : e.dead) o << ' ' << d; o << '\n' << e.name << '\n' << e.stance << ' ' << e.trust << ' ' << e.talkAt << ' ' << (int)e.seen << ' ' << e.seenTc << ' ' << e.seenDead << ' ' << e.color << ' ' << e.civ << '\n'; }
   o << NPRESET << '\n'; for (int p = 0; p < NPRESET; p++) { for (int i = 0; i < U_COUNT; i++) o << S.presets[p][i] << ' '; o << '\n'; }
   o << S.meta.prestige << ' ' << S.meta.points << ' ' << S.meta.unlocked << ' ' << S.relicsHeld << ' ' << S.betrayals << ' ' << S.relicCheck << ' ' << S.relics.size() << '\n';
   for (auto& rl : S.relics) o << rl.id << ' ' << rl.x << ' ' << rl.y << '\n';
   o << S.squads.size() << '\n'; for (auto& q : S.squads) { o << q.id << ' ' << q.x << ' ' << q.y << ' ' << q.tx << ' ' << q.ty << ' ' << (int)q.go << ' ' << (int)q.recall << ' ' << q.mode << ' ' << q.target << ' ' << q.gx << ' ' << q.gy << ' ' << q.u.size(); for (auto& u : q.u) o << ' ' << u.type << ' ' << u.hp; o << '\n'; }
   o << S.musicVol << ' ' << S.sfxVol << '\n';
   o << S.meta.civ << ' ' << S.meta.boon << ' ' << (S.meta.outlineOn ? 1 : 0) << '\n';
+  o << S.grudges.size() << '\n'; for (auto& gr : S.grudges) o << gr.enemyId << ' ' << gr.tc << ' ' << gr.seed << ' ' << gr.civ << ' ' << gr.color << '\n' << gr.name << '\n';
   std::ofstream f(savePath(), std::ios::binary | std::ios::trunc); f << o.str();
 }
 bool loadGame() {
   std::ifstream f(savePath(), std::ios::binary); if (!f) return false;
-  std::string magic; f >> magic; if (magic != "DOK1" && magic != "DOK2" && magic != "DOK3" && magic != "DOK4" && magic != "DOK5" && magic != "DOK6" && magic != "DOK7" && magic != "DOK8" && magic != "DOK9" && magic != "DOK10" && magic != "DOK11" && magic != "DOK12" && magic != "DOK13" && magic != "DOK14") return false;
-  bool dok14 = magic == "DOK14", dok13 = magic == "DOK13" || dok14, dok12 = magic == "DOK12" || dok13, dok11 = magic == "DOK11" || dok12, dok10 = magic == "DOK10" || dok11, dok9 = magic == "DOK9" || dok10, dok8 = magic == "DOK8" || dok9, dok7 = magic == "DOK7" || dok8; if (dok7) magic = "DOK6";
+  std::string magic; f >> magic; if (magic != "DOK1" && magic != "DOK2" && magic != "DOK3" && magic != "DOK4" && magic != "DOK5" && magic != "DOK6" && magic != "DOK7" && magic != "DOK8" && magic != "DOK9" && magic != "DOK10" && magic != "DOK11" && magic != "DOK12" && magic != "DOK13" && magic != "DOK14" && magic != "DOK15") return false;
+  bool dok15 = magic == "DOK15", dok14 = magic == "DOK14" || dok15, dok13 = magic == "DOK13" || dok14, dok12 = magic == "DOK12" || dok13, dok11 = magic == "DOK11" || dok12, dok10 = magic == "DOK10" || dok11, dok9 = magic == "DOK9" || dok10, dok8 = magic == "DOK8" || dok9, dok7 = magic == "DOK7" || dok8; if (dok7) magic = "DOK6";
   int armyN = magic == "DOK1" ? 3 : 9;
   State n; int seen = 0;
   f >> n.t >> n.villagers >> n.renown >> n.shieldUntil >> n.nextRaid >> n.nid >> n.seed >> n.rivalSeq >> seen >> n.lastSeen; n.seenIntro = seen;
@@ -966,7 +975,7 @@ bool loadGame() {
   if (dok7) {
     size_t rc = 0; f >> rc;
     for (size_t i = 0; i < rc && f; i++) {
-      Replay r; std::string tag; int win, def, k; f >> tag >> r.kind >> win >> r.stars >> r.pct >> r.dr >> r.tcMine >> r.tcEnemy >> r.tcBuild >> def >> r.reserve0 >> r.endStep >> r.dt >> r.when; if (dok12) f >> r.lordColor; r.win = win; r.defence = def;
+      Replay r; std::string tag; int win, def, k; f >> tag >> r.kind >> win >> r.stars >> r.pct >> r.dr >> r.tcMine >> r.tcEnemy >> r.tcBuild >> def >> r.reserve0 >> r.endStep >> r.dt >> r.when; if (dok12) f >> r.lordColor; if (dok15) f >> r.lordCiv; r.win = win; r.defence = def;
       for (int q = 0; q < NRES; q++) f >> r.loot.v[q];
       for (int q = 0; q < 2; q++) f >> r.mul[q].melee >> r.mul[q].ranged >> r.mul[q].siege >> r.mul[q].hp;
       std::string line; std::getline(f, line); std::getline(f, r.title); std::getline(f, r.who);
@@ -979,7 +988,7 @@ bool loadGame() {
   }
   if (dok9) {
     size_t ne = 0; f >> n.enemyCheck >> ne; std::string line; std::getline(f, line);
-    for (size_t i = 0; i < ne && f; i++) { Enemy e; size_t nd = 0; f >> e.id >> e.quad >> e.tc >> e.pers >> e.seed >> e.nextLvl >> nd; for (size_t k = 0; k < nd; k++) { int d; f >> d; e.dead.push_back(d); } std::getline(f, line); std::getline(f, e.name); if (dok10) { int sn; f >> e.stance >> e.trust >> e.talkAt >> sn >> e.seenTc >> e.seenDead; if (dok12) f >> e.color; e.seen = sn; std::getline(f, line); } else { e.seen = true; e.seenTc = e.tc; e.seenDead = e.dead.size(); e.stance = (e.pers == 1 || e.pers == 3) ? ST_WAR : ST_PEACE; } n.enemies.push_back(e); }
+    for (size_t i = 0; i < ne && f; i++) { Enemy e; size_t nd = 0; f >> e.id >> e.quad >> e.tc >> e.pers >> e.seed >> e.nextLvl >> nd; for (size_t k = 0; k < nd; k++) { int d; f >> d; e.dead.push_back(d); } std::getline(f, line); std::getline(f, e.name); if (dok10) { int sn; f >> e.stance >> e.trust >> e.talkAt >> sn >> e.seenTc >> e.seenDead; if (dok12) f >> e.color; if (dok15) f >> e.civ; else e.civ = (int)(e.seed % NCIV); e.civ = clampi(e.civ, 0, NCIV - 1); e.seen = sn; std::getline(f, line); } else { e.seen = true; e.seenTc = e.tc; e.seenDead = e.dead.size(); e.stance = (e.pers == 1 || e.pers == 3) ? ST_WAR : ST_PEACE; } n.enemies.push_back(e); }
   }
   if (dok9 && !dok12) { bool used[NLORDCOL] = {}; for (auto& e : n.enemies) { int c = 0; while (c < NLORDCOL - 1 && used[c]) c++; e.color = c; used[c] = true; } }      // older saves: give the lords their colours now
   if (dok8) { int np = 0, uc = U_COUNT; f >> np; for (int p = 0; p < np; p++) for (int i = 0; i < uc; i++) { int v; f >> v; if (p < NPRESET) n.presets[p][i] = v; } }
@@ -987,6 +996,7 @@ bool loadGame() {
   if (dok11) { size_t ns = 0; f >> ns; for (size_t i = 0; i < ns && f; i++) { Squad q; int go, rc; size_t nu; f >> q.id >> q.x >> q.y >> q.tx >> q.ty >> go >> rc >> q.mode >> q.target >> q.gx >> q.gy >> nu; q.go = go; q.recall = rc; for (size_t k = 0; k < nu; k++) { SqUnit u; f >> u.type >> u.hp; q.u.push_back(u); } n.squads.push_back(q); } }
   if (dok13) f >> n.musicVol >> n.sfxVol;
   if (dok14) { int oo = 0; f >> n.meta.civ >> n.meta.boon >> oo; n.meta.outlineOn = oo != 0; n.meta.civ = clampi(n.meta.civ, 0, NCIV - 1); n.meta.boon = clampi(n.meta.boon, 0, NBOON - 1); }
+  if (dok15) { size_t ng = 0; f >> ng; for (size_t i = 0; i < ng && f; i++) { Grudge gr; f >> gr.enemyId >> gr.tc >> gr.seed >> gr.civ >> gr.color; std::string ln; std::getline(f, ln); std::getline(f, gr.name); gr.civ = clampi(gr.civ, 0, NCIV - 1); gr.color = clampi(gr.color, 0, NLORDCOL - 1); n.grudges.push_back(gr); } }
   if (!f || n.b.empty()) return false;
   S = n;
   if (magic != "DOK6") genWorld(); else if (!dok9) genWorldOldSave();

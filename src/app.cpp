@@ -1,3 +1,4 @@
+#include <set>
 // Dawn of Kings â€” application layer: input, rendering of the isometric world, immediate-mode UI, raid flow
 #include <SDL.h>
 #include <cstdarg>
@@ -22,7 +23,7 @@ enum View { V_HOME, V_BATTLE };
 enum Modal { M_NONE, M_INTRO, M_BUILD, M_ARMY, M_LADDER, M_RAID, M_SCOUT, M_ATK_RESULT, M_DEF_RESULT, M_WELCOME, M_SEASON, M_SETTINGS, M_EXPLORE, M_OUTPOST, M_REPLAYS, M_PRESET, M_DIPLO, M_PRESTIGE, M_SQUADS, M_ASCEND };
 enum Kind { K_BARB, K_RIVAL, K_DEFENCE };
 
-struct Scout { bool rival = false; int i = 0; Base base; std::string title; int opp = 0, tc = 1, win = 0, lose = 0, diff = 0; float lootF = 1, winF = 1; int enemyId = -1; std::vector<int> srcIdx; bool sneak = false; int fromSquad = -1; };
+struct Scout { bool rival = false; int i = 0; Base base; std::string title; int opp = 0, tc = 1, win = 0, lose = 0, diff = 0; float lootF = 1, winF = 1; int enemyId = -1; std::vector<int> srcIdx; bool sneak = false; int fromSquad = -1; int civ = 0, color = -1; std::string grudge; };
 struct AtkResult { bool win; int stars, pct; Cost got; int dr; int surv[U_COUNT]; Kind kind; int ret[U_COUNT]; };
 
 static View view = V_HOME;
@@ -44,11 +45,16 @@ static uint32_t lordTintOf(int c) { return mixc(0xffffff, LORD_COL[clampi(c, 0, 
 static int sqSel = -1; static bool sqEscortPending = false; static int sqForm[U_COUNT]; static int savedArmy[U_COUNT]; static bool squadBattle = false;
 static int diploEnemy = -1; static std::string diploMsg; static bool armRestart = false, armAscend = false;
 constexpr int REW_OUTLINE = 5; static int ascCiv = 0, ascReward = 0;      // ascension screen: chosen civilization and reward (1..4 = boons, 5 = gold outline)
-static int loadedCiv = 0;                                                   // civilization whose building sprites are in memory
-static void syncCiv() {                                                     // keep the civ sprite set and the gold outline in step with the game state
+static unsigned loadedCivs = 0;                                             // bit k set = civilization k's building sprites are in memory
+static int battleCiv = 0;                                                   // civilization of the base being attacked
+static bool treacheryPending = false;                                       // attacking a lord you are at peace with: the treaty breaks when the first troop lands
+static Squad heldSquad; static bool squadHeld = false;
+static void syncCiv() {                                                     // keep the civ sprite sets (yours + the lords you have seen + the base being fought) and the gold outline in step with the game state
   if (!spritesReady()) return;
-  int want = clampi(S.meta.civ, 0, NCIV - 1);
-  if (want != loadedCiv) { if (loadedCiv > 0) unloadCivSprites(civCode(loadedCiv)); if (want > 0) loadCivSprites(civCode(want), want); loadedCiv = want; }
+  unsigned want = 0; if (S.meta.civ > 0 && S.meta.civ < NCIV) want |= 1u << S.meta.civ;
+  for (auto& e : S.enemies) if (e.seen && e.civ > 0 && e.civ < NCIV) want |= 1u << e.civ;
+  if (view == V_BATTLE && battleCiv > 0 && battleCiv < NCIV) want |= 1u << battleCiv;
+  if (want != loadedCivs) { for (int k = 1; k < NCIV; k++) { unsigned b = 1u << k; if ((loadedCivs & b) && !(want & b)) unloadCivSprites(civCode(k)); else if ((want & b) && !(loadedCivs & b)) loadCivSprites(civCode(k), k); } loadedCivs = want; }
   setOutlineEnabled(S.meta.outlineOn && outlineOwned());
 }
 static int enemySel = -1;                       // selected rival lord (tap one of their buildings)
@@ -64,7 +70,10 @@ static AtkResult atk; static Report defRep; static bool hasDef = false;
 static int usedCount[U_COUNT]; static int presetEdit = 0;   // troops deployed in the current raid (they never come back); preset being edited
 static ReplayPlayer RP; static Replay repCur, rec;
 static bool replaying = false, recording = false, rpPaused = false; static float rpSpeed = 1, battleAcc = 0; static int bSteps = 0;
-static void deployRec(UType t, float x, float y, bool def = false) { if (recording && !def) rec.deploys.push_back({bSteps, (int)t, x, y}); if (!def) usedCount[t]++; B.sim.deploy(t, x, y, def); }
+static void deployRec(UType t, float x, float y, bool def = false) {
+  if (!def && treacheryPending) { treacheryPending = false; diploWar(scout.enemyId, true); }      // the first troop to land breaks the treaty
+  if (recording && !def) rec.deploys.push_back({bSteps, (int)t, x, y}); if (!def) usedCount[t]++; B.sim.deploy(t, x, y, def);
+}
 static struct { double away = 0; Cost gain; Report rep; bool raided = false, outpost = false; } welcome;
 
 static struct { float x = 0, y = 0, zoom = 1, vx = 0, vy = 0, zt = 1, zax = 0, zay = 0; } cam;
@@ -336,7 +345,7 @@ static void drawRubble(const SimB& b, float alpha = 1.f) {
   if (spritesReady()) { if (const SpriteDef* sp = findSprite(b.w >= 4 ? "rubble_4" : b.w >= 3 ? "rubble_3" : "rubble_2")) drawSprite(*sp, c.x, c.y, cam.zoom, alpha); }
   else polyFill({iso(b.x, b.y), iso(b.x + b.w, b.y), iso(b.x + b.w, b.y + b.h), iso(b.x, b.y + b.h)}, 0x1e140a, 0.55f * alpha);
 }
-struct BView { BType type; int lvl; float x, y; int w, h; float hpf; bool simMode; bool building; float prog; bool sel; int status; int workers = 0, slots = 0; bool own = false; };   // own: the player's building (civilization style, gold outline)
+struct BView { BType type; int lvl; float x, y; int w, h; float hpf; bool simMode; bool building; float prog; bool sel; int status; int workers = 0, slots = 0; bool own = false; int civ = 0; };   // own: the player's building (civilization style, gold outline)
 static const SpriteDef* spriteByAge(const char* base, int age, const std::string& pf = "") {
   char nm[64];
   for (int d = 0; d < 4; d++) for (int sgn = -1; sgn <= 1; sgn += 2) {
@@ -374,9 +383,9 @@ static const SpriteDef* buildingSpriteP(BType t, int lvl, int age, const std::st
     default: return findSprite(pf + "chief_0");
   }
 }
-// own = one of the player's buildings: drawn in the chosen civilization's architecture where that civ has a sprite for it
-static const SpriteDef* buildingSprite(BType t, int lvl, int age, bool own = false) {
-  if (own && S.meta.civ > 0 && S.meta.civ < NCIV) { if (const SpriteDef* sp = buildingSpriteP(t, lvl, age, std::string(civCode(S.meta.civ)) + "_")) return sp; }
+// civ > 0: drawn in that civilization's architecture where it has a sprite for the building (yours, a rival lord's, the base under attack)
+static const SpriteDef* buildingSprite(BType t, int lvl, int age, int civ = 0) {
+  if (civ > 0 && civ < NCIV) { if (const SpriteDef* sp = buildingSpriteP(t, lvl, age, std::string(civCode(civ)) + "_")) return sp; }
   return buildingSpriteP(t, lvl, age, "");
 }
 static bool wallGrid[WORLD * WORLD];
@@ -393,7 +402,7 @@ static const SpriteDef* pieceSprite(BType t, int lvl, int x, int y) {
 static const SpriteDef* scaffoldFor(int w) { return findSprite(w >= 4 ? "scaffold_4" : w >= 3 ? "scaffold_3" : "scaffold_2"); }
 static void drawBuildingImpl(const BView& b, int age) {
   const BDef& d = bdef(b.type);
-  const SpriteDef* sp = !spritesReady() ? nullptr : isPiece(b.type) ? pieceSprite(b.type, b.lvl, (int)b.x, (int)b.y) : buildingSprite(b.type, b.lvl, age, b.own);
+  const SpriteDef* sp = !spritesReady() ? nullptr : isPiece(b.type) ? pieceSprite(b.type, b.lvl, (int)b.x, (int)b.y) : buildingSprite(b.type, b.lvl, age, b.civ);
   if (sp) {
     Pt c = iso(b.x + b.w / 2.f, b.y + b.h / 2.f); float z = cam.zoom;
     if (b.lvl == 0) {
@@ -563,13 +572,13 @@ static void drawHome() {
       EC& ec = ecache[e.id]; if (ec.tc != e.seenTc || ec.dead != e.seenDead || ec.b.empty()) { ec.tc = e.seenTc; ec.dead = e.seenDead; ec.b = enemyBaseAt(e, e.seenTc, e.seenDead).buildings; }
       int ox, oy; enemyOrigin(e, ox, oy);
       for (auto& sb : ec.b) if (sb.wall) wallSet((int)sb.x + ox, (int)sb.y + oy);
-      int eage = clampi(ageOf(e.seenTc), 0, 3); std::string label = e.name + "  TC" + std::to_string(e.seenTc) + (e.visNow ? "" : "  (last seen)"); uint32_t lcol = LORD_COL[clampi(e.color, 0, NLORDCOL - 1)]; uint32_t tint = e.visNow ? lordTintOf(e.color) : mixc(lordTintOf(e.color), 0x808080, 0.5f);
+      int eage = clampi(ageOf(e.seenTc), 0, 3); std::string label = e.name + "  (" + CIVS[clampi(e.civ, 0, NCIV - 1)].name + ")  TC" + std::to_string(e.seenTc) + (e.visNow ? "" : "  (last seen)"); uint32_t lcol = LORD_COL[clampi(e.color, 0, NLORDCOL - 1)]; uint32_t tint = e.visNow ? lordTintOf(e.color) : mixc(lordTintOf(e.color), 0x808080, 0.5f);
       for (auto& sb : ec.b) {
         if (sb.trap || !isExplored((int)sb.x + ox, (int)sb.y + oy) || !onScreen(sb.x + ox + sb.w / 2.f, sb.y + oy + sb.h / 2.f, 160 * cam.zoom + 60)) continue;
-        BView v{sb.type, sb.lvl, sb.x + ox, sb.y + oy, sb.w, sb.h, 1, false, false, 0, e.id == enemySel && sb.hq, 0}; bool hq = sb.hq;
+        BView v{sb.type, sb.lvl, sb.x + ox, sb.y + oy, sb.w, sb.h, 1, false, false, 0, e.id == enemySel && sb.hq, 0}; v.civ = e.civ; bool hq = sb.hq;
         items.push_back({dep(v.x + v.w / 2.f, v.y + v.h / 2.f), [v, eage, hq, label, tint, lcol] {
           setSpriteTint(tint); drawBuilding(v, eage); setSpriteTint(0xffffff);
-          if (hq) { Pt c = iso(v.x + v.w / 2.f, v.y + v.h / 2.f); const SpriteDef* sp = buildingSprite(v.type, v.lvl, eage); float ty = c.y - (sp ? sp->ay / sp->scale * cam.zoom : 40.f) - U(34); float lw = G.textSize(label, F_S).x; G.circle(c.x - lw / 2 - U(9), ty + U(8), U(5.5f), lcol); G.circle(c.x - lw / 2 - U(9), ty + U(8), U(3.2f), shadec(lcol, 0.35f)); G.textShadow(label, c.x, ty, F_S, mixc(lcol, 0xffffff, 0.35f), A_CENTER); }
+          if (hq) { Pt c = iso(v.x + v.w / 2.f, v.y + v.h / 2.f); const SpriteDef* sp = buildingSprite(v.type, v.lvl, eage, v.civ); float ty = c.y - (sp ? sp->ay / sp->scale * cam.zoom : 40.f) - U(34); float lw = G.textSize(label, F_S).x; G.circle(c.x - lw / 2 - U(9), ty + U(8), U(5.5f), lcol); G.circle(c.x - lw / 2 - U(9), ty + U(8), U(3.2f), shadec(lcol, 0.35f)); G.textShadow(label, c.x, ty, F_S, mixc(lcol, 0xffffff, 0.35f), A_CENTER); }
         }});
       }
     }
@@ -616,7 +625,7 @@ static void drawHome() {
   }
   for (auto& b : S.b) {
     int vl = (b.type == B_WALL || b.type == B_GATE) ? S.wallLvl : (b.type == B_SPIKE || b.type == B_OIL) ? S.trapLvl : b.lvl;
-    BView v{b.type, vl, (float)b.x, (float)b.y, b.w, b.h, 1, false, b.building, b.building ? clampf((float)((S.t - b.bStart) / (b.bEnd - b.bStart)), 0, 1) : 0, b.id == selId, b.status}; v.own = true;
+    BView v{b.type, vl, (float)b.x, (float)b.y, b.w, b.h, 1, false, b.building, b.building ? clampf((float)((S.t - b.bStart) / (b.bEnd - b.bStart)), 0, 1) : 0, b.id == selId, b.status}; v.own = true; v.civ = S.meta.civ;
     if (bdef(b.type).res >= 0 && isDone(b)) { v.workers = b.workers; v.slots = bslots(b.type, b.lvl); }
     items.push_back({dep(b.x + b.w / 2.f, b.y + b.h / 2.f), [v, age] { drawBuilding(v, age); }});
   }
@@ -668,7 +677,7 @@ static void drawHome() {
       if (bmPaint) { polyFill({iso(x, y), iso(x + 1, y), iso(x + 1, y + 1), iso(x, y + 1)}, ok ? 0x50ff78 : 0xff4646, 0.5f); return; }
       polyFill({iso(x, y), iso(x + d.w, y), iso(x + d.w, y + d.h), iso(x, y + d.h)}, ok ? 0x50ff78 : 0xff4646, 0.45f);
       if (const SpriteDef* sp = spriteNamed("") ; sp) {}
-      if (const SpriteDef* sp = spritesReady() ? buildingSprite(ty, 1, std::min(ageOf(tcLvl()), 3), true) : nullptr) { Pt c = iso(x + d.w / 2.f, y + d.h / 2.f); drawSprite(*sp, c.x, c.y, cam.zoom, ok ? 0.6f : 0.35f); }
+      if (const SpriteDef* sp = spritesReady() ? buildingSprite(ty, 1, std::min(ageOf(tcLvl()), 3), S.meta.civ) : nullptr) { Pt c = iso(x + d.w / 2.f, y + d.h / 2.f); drawSprite(*sp, c.x, c.y, cam.zoom, ok ? 0.6f : 0.35f); }
       else boxDraw((float)x, (float)y, d.w, d.h, d.hgt, ok ? 0x6fd88a : 0xd86f6f, 0.55f);
     }});
   }
@@ -689,12 +698,12 @@ static void drawBattle() {
       const SimB* bp = &b; float fall = bp->deadT;
       items.push_back({dep(b.x + b.w / 2.f, b.y + b.h / 2.f) - .5f, [bp, age, fall] {
         if (fall < 0.9f && spritesReady()) {                       // collapse: the building sinks and fades while the rubble fades in
-          if (const SpriteDef* sp = buildingSprite(bp->type, bp->lvl, age, B.kind == K_DEFENCE)) { Pt c = iso(bp->x + bp->w / 2.f, bp->y + bp->h / 2.f); float k = fall / 0.9f; drawSprite(*sp, c.x, c.y + k * 14 * cam.zoom, cam.zoom, 1.f - k, 1.f - 0.3f * k); }
+          if (const SpriteDef* sp = buildingSprite(bp->type, bp->lvl, age, B.kind == K_DEFENCE ? S.meta.civ : battleCiv)) { Pt c = iso(bp->x + bp->w / 2.f, bp->y + bp->h / 2.f); float k = fall / 0.9f; drawSprite(*sp, c.x, c.y + k * 14 * cam.zoom, cam.zoom, 1.f - k, 1.f - 0.3f * k); }
         }
         drawRubble(*bp, easeOut((fall - 0.35f) / 0.6f));
       }}); continue;
     }
-    BView v{b.type, b.lvl, b.x, b.y, b.w, b.h, b.hp / b.maxhp, true, false, 0, false, 0}; v.own = B.kind == K_DEFENCE;
+    BView v{b.type, b.lvl, b.x, b.y, b.w, b.h, b.hp / b.maxhp, true, false, 0, false, 0}; v.own = B.kind == K_DEFENCE; v.civ = v.own ? S.meta.civ : battleCiv;
     uint32_t bt = (B.kind == K_RIVAL && battleLordColor >= 0) ? lordTintOf(battleLordColor) : 0xffffff;
     items.push_back({dep(b.x + b.w / 2.f, b.y + b.h / 2.f), [v, age, bt] { setSpriteTint(bt); drawBuilding(v, age); setSpriteTint(0xffffff); }});
   }
@@ -741,24 +750,25 @@ static void goHome() {
 static void beginBattle() {
   modal = M_NONE; squadBattle = false;
   if (scout.fromSquad >= 0) {                                              // the squad at the gates fights: it becomes the army for this battle
-    if (Squad* sq = findSquad(scout.fromSquad)) { for (int i = 0; i < U_COUNT; i++) { savedArmy[i] = S.army[i]; S.army[i] = 0; } for (auto& u : sq->u) S.army[u.type]++; squadBattle = true; squadRemove(scout.fromSquad); sqSel = -1; }
+    if (Squad* sq = findSquad(scout.fromSquad)) { heldSquad = *sq; squadHeld = true; for (int i = 0; i < U_COUNT; i++) { savedArmy[i] = S.army[i]; S.army[i] = 0; } for (auto& u : sq->u) S.army[u.type]++; squadBattle = true; squadRemove(scout.fromSquad); sqSel = -1; }
     scout.fromSquad = -1;
   }
   B.sim = Sim(); B.sim.b = scout.base.buildings; for (auto& sb : B.sim.b) { sb.x += SOFF; sb.y += SOFF; } B.sim.reserve = [] { return armyCount() - S.army[U_MONK]; };
   B.sim.mul[0] = techMul(); B.sim.mul[1] = enemyMul(scout.tc);
   B.kind = scout.rival ? K_RIVAL : K_BARB; B.done = false; B.sel = U_MILITIA;
   for (int i = 0; i < U_COUNT; i++) if (S.army[i] > 0) { B.sel = (UType)i; break; }
-  battleLordColor = -1;
-  if (scout.enemyId >= 0) { if (scout.sneak) diploWar(scout.enemyId, true); if (Enemy* en = findEnemy(scout.enemyId)) { addEnemyDefenders(B.sim, *en); battleLordColor = en->color; } }
+  battleLordColor = scout.color; battleCiv = scout.civ; treacheryPending = scout.sneak && scout.enemyId >= 0;
+  if (scout.enemyId >= 0) { if (Enemy* en = findEnemy(scout.enemyId)) { addEnemyDefenders(B.sim, *en); battleLordColor = en->color; battleCiv = en->civ; } }
   applyEnemyPalette(battleLordColor);
   B.sim.spawnGarrisons();
   for (int i = 0; i < U_COUNT; i++) usedCount[i] = 0;
   replaying = false; recording = true; bSteps = 0; battleAcc = 0;
-  rec = replayCapture(B.sim, scout.rival ? 1 : 0, 1.f / 60.f); rec.lordColor = battleLordColor; rec.reserve0 = armyCount() - S.army[U_MONK]; rec.title = scout.title; rec.who = scout.title; rec.tcMine = tcLvl(); rec.tcEnemy = scout.tc; rec.tcBuild = scout.tc;
+  rec = replayCapture(B.sim, scout.rival ? 1 : 0, 1.f / 60.f); rec.lordColor = battleLordColor; rec.lordCiv = battleCiv; rec.reserve0 = armyCount() - S.army[U_MONK]; rec.title = scout.title; rec.who = scout.title; rec.tcMine = tcLvl(); rec.tcEnemy = scout.tc; rec.tcBuild = scout.tc;
   view = V_BATTLE; selId = -1; buildMode = false; centerCamera();
+  cam.zoom = cam.zt = clampf(cam.zoom * 1.7f, 0.25f, 2.2f); cam.x = G.W / 2.f; cam.y = G.H / 2.f - (SIMN / 2.f * TH) * cam.zoom + U(8);      // open zoomed in on the base itself, so you can see what you are about to attack
 }
 static void startBarb(int i) {
-  scout = Scout(); scout.rival = false; scout.i = i; scout.base = campBase(i); scout.tc = campTier(i); scout.title = scout.base.name; scout.win = std::min(60, 4 + 2 * i); scout.lose = 0; modal = M_SCOUT;
+  scout = Scout(); scout.rival = false; scout.i = i; scout.base = campBase(i); scout.tc = campTier(i); scout.title = scout.base.name; scout.win = std::min(60, 4 + 2 * i); scout.lose = 0; beginBattle();
 }
 static void findRival(bool first) {
   if (!first) { if (S.res[GOLD] < 30) { toast("Need 30 gold to search again"); return; } S.res[GOLD] -= 30; }
@@ -768,17 +778,32 @@ static void findRival(bool first) {
   Rng r((uint32_t)(S.rivalSeq * 7919) + S.seed); int li = pool[(int)(r.next() * pool.size())];
   int tc = clampi(tcLvl() + rollTcDiff(r), 1, MAXTC); int diff = tc - tcLvl();
   scout = Scout(); scout.rival = true; scout.base = genBase((uint32_t)(li * 131 + S.rivalSeq), tc, false, 0);
+  { uint32_t hs = (uint32_t)(li * 2654435761u) ^ (uint32_t)(S.rivalSeq * 40503u) ^ S.seed; scout.civ = (int)((hs >> 7) % NCIV); scout.color = (int)((hs >> 17) % NLORDCOL); }      // every opponent gets a random civilization and colour
   scout.title = L[li].name; scout.opp = lordRenown(L[li]); scout.tc = tc; scout.diff = diff; scout.lootF = lootFactor(diff); scout.winF = winFactor(diff);
-  double E = expectedScore(S.renown, scout.opp); scout.win = std::max(1, roundi(40 * (1 - E) * winFactor(diff))); scout.lose = std::max(1, roundi(40 * E * loseFactor(diff))); modal = M_SCOUT;
+  double E = expectedScore(S.renown, scout.opp); scout.win = std::max(1, roundi(40 * (1 - E) * winFactor(diff))); scout.lose = std::max(1, roundi(40 * E * loseFactor(diff))); beginBattle();
 }
-static void startEnemy(int id) {
+static void startEnemy(int id, int fromSquad = -1) {
   Enemy* e = findEnemy(id); if (!e) return;
-  scout = Scout(); scout.rival = true; scout.enemyId = id; scout.base = enemyBase(*e, &scout.srcIdx); scout.title = e->name + "'s stronghold"; scout.tc = e->tc; scout.opp = S.renown;
+  scout = Scout(); scout.fromSquad = fromSquad; scout.civ = e->civ; scout.color = e->color; scout.rival = true; scout.enemyId = id; scout.base = enemyBase(*e, &scout.srcIdx); scout.title = e->name + "'s stronghold"; scout.tc = e->tc; scout.opp = S.renown;
   int diff = e->tc - tcLvl(); scout.diff = diff; scout.lootF = lootFactor(diff); scout.winF = winFactor(diff);
-  scout.win = std::max(1, roundi(20 * winFactor(diff))); scout.lose = std::max(1, roundi(20 * loseFactor(diff))); scout.sneak = e->stance >= ST_PEACE; enemySel = -1; modal = M_SCOUT;
+  scout.win = std::max(1, roundi(20 * winFactor(diff))); scout.lose = std::max(1, roundi(20 * loseFactor(diff))); scout.sneak = e->stance >= ST_PEACE; enemySel = -1; beginBattle();
+}
+static void startGrudge(int idx) {                                          // revenge: attack someone who raided you
+  if (idx < 0 || idx >= (int)S.grudges.size()) return; Grudge g = S.grudges[idx];
+  if (g.enemyId >= 0) {
+    Enemy* e = findEnemy(g.enemyId); if (!e) { S.grudges.erase(S.grudges.begin() + idx); toast("That lord is no more"); return; }
+    e->seen = true; e->seenTc = e->tc; e->seenDead = e->dead.size(); g_fogDirty = true; startEnemy(g.enemyId); scout.grudge = g.name; return;
+  }
+  scout = Scout(); scout.rival = true; scout.base = genBase(g.seed ^ 0x5bd1e995u, g.tc, false, 0); scout.title = g.name + " (revenge)"; scout.opp = S.renown; scout.tc = g.tc; scout.civ = g.civ; scout.color = g.color; scout.grudge = g.name;
+  int diff = g.tc - tcLvl(); scout.diff = diff; scout.lootF = lootFactor(diff); scout.winF = winFactor(diff); scout.win = std::max(1, roundi(30 * winFactor(diff))); scout.lose = std::max(1, roundi(20 * loseFactor(diff))); beginBattle();
+}
+static void cancelScout() {                                                 // back out of the base you were looking at: nothing was spent
+  if (squadBattle) { for (int i = 0; i < U_COUNT; i++) S.army[i] = savedArmy[i]; squadBattle = false; if (squadHeld) { heldSquad.go = false; S.squads.push_back(heldSquad); squadHeld = false; } }
+  treacheryPending = false; recording = false; goHome();
 }
 static void finishAttack() {
-  B.done = true; Sim& sim = B.sim; int stars = sim.stars(), pct = sim.pct();
+  B.done = true; Sim& sim = B.sim; int stars = sim.stars(), pct = sim.pct(); treacheryPending = false; squadHeld = false;
+  if (!scout.grudge.empty()) for (auto it = S.grudges.begin(); it != S.grudges.end();) { if (it->name == scout.grudge) it = S.grudges.erase(it); else ++it; }      // revenge taken
   AtkResult r{}; r.kind = B.kind; r.stars = stars; r.pct = pct;
   for (int i = 0; i < U_COUNT; i++) r.surv[i] = usedCount[i];                          // deployed troops are spent: they do not return
   if (S.meta.boon == BOON_VETERANS) {                                                  // ...unless the Veteran's Return reward is active: survivors march back to the Army Camp
@@ -805,7 +830,7 @@ static void finishAttack() {
 static void startDefence() {
   incoming = false; modal = M_NONE; selId = -1; buildMode = false;
   B.sim = makeDefenceSim(); B.kind = K_DEFENCE; B.done = false; view = V_BATTLE;
-  replaying = false; recording = true; bSteps = 0; battleAcc = 0; battleLordColor = -1; if (B.sim.atkEnemy >= 0) if (Enemy* ae = findEnemy(B.sim.atkEnemy)) battleLordColor = ae->color; applyEnemyPalette(battleLordColor); rec = replayCapture(B.sim, 2, 1.f / 60.f); rec.lordColor = battleLordColor; rec.tcMine = tcLvl(); rec.tcEnemy = B.sim.atkTc; rec.tcBuild = tcLvl();
+  replaying = false; recording = true; bSteps = 0; battleAcc = 0; battleLordColor = B.sim.atkColor; if (B.sim.atkEnemy >= 0) if (Enemy* ae = findEnemy(B.sim.atkEnemy)) battleLordColor = ae->color; applyEnemyPalette(battleLordColor); rec = replayCapture(B.sim, 2, 1.f / 60.f); rec.lordColor = battleLordColor; rec.tcMine = tcLvl(); rec.tcEnemy = B.sim.atkTc; rec.tcBuild = tcLvl();
   centerCamera();
 }
 static void finishDefence() { B.done = true; defRep = applyDefence(B.sim); hasDef = true;
@@ -815,7 +840,7 @@ static void startReplay(int idx) {
   if (idx < 0 || idx >= (int)S.replays.size()) return;
   repCur = S.replays[idx]; modal = M_NONE; selId = -1; buildMode = false; explSel = -1; incoming = false;
   B.kind = repCur.defence ? K_DEFENCE : repCur.kind == 1 ? K_RIVAL : K_BARB; B.done = false; scout.tc = repCur.tcBuild; scout.rival = repCur.kind == 1;
-  battleLordColor = repCur.lordColor; applyEnemyPalette(battleLordColor);
+  battleLordColor = repCur.lordColor; battleCiv = repCur.lordCiv; applyEnemyPalette(battleLordColor);
   replaying = true; recording = false; rpPaused = false; rpSpeed = 1; RP.start(repCur, B.sim); fxClear(); view = V_BATTLE; centerCamera();
 }
 static std::string agoStr(long long when) { long long d = (long long)std::time(nullptr) - when; if (d < 60) return "just now"; if (d < 3600) return std::to_string(d / 60) + " min ago"; if (d < 86400) return std::to_string(d / 3600) + " h ago"; return std::to_string(d / 86400) + " d ago"; }
@@ -997,7 +1022,7 @@ static void drawModal() {
             else toast(idleV() < 1 && assigned() < 1 ? "No villager available" : "Not enough resources");
           }
           float tx0 = f.x0 + U(66);
-          if (spritesReady()) { const SpriteDef* sp = isPiece(t) ? pieceSprite((BType)t, 1, 0, 0) : buildingSprite((BType)t, 1, std::min(ageOf(tcLvl()), 3), true); if (sp) drawIcon(*sp, f.x0 + U(33), f.y + rh / 2, U(54), err ? 0.4f : 1.f); }
+          if (spritesReady()) { const SpriteDef* sp = isPiece(t) ? pieceSprite((BType)t, 1, 0, 0) : buildingSprite((BType)t, 1, std::min(ageOf(tcLvl()), 3), S.meta.civ); if (sp) drawIcon(*sp, f.x0 + U(33), f.y + rh / 2, U(54), err ? 0.4f : 1.f); }
           G.text(d.name, tx0, f.y + U(7), F_M, err ? 0x8a8478 : C_TXT);
           G.text(err ? err : d.desc, tx0, f.y + U(32), F_S, err ? C_BAD : C_DIM);
           drawCost(f.x0 + f.maxW - U(10), f.y + U(7), d.cost, A_RIGHT);
@@ -1084,10 +1109,18 @@ static void drawModal() {
           if (uiButton(f.x0 + f.maxW - U(82), f.y, U(82), rh, "Talk", 0, true, F_S)) { diploEnemy = e.id; diploMsg.clear(); modal = M_DIPLO; modalScroll = 0; SDL_RenderSetClipRect(G.r, nullptr); return; }
           int diff = e.seenTc - tcLvl(); std::vector<int> si; int nb = (int)enemyBaseAt(e, e.seenTc, e.seenDead, &si).buildings.size();
           G.text(std::string(LORD_COL_NAME[clampi(e.color, 0, NLORDCOL - 1)]) + " lord " + e.name + "  -  Town Center Lv" + std::to_string(e.seenTc) + "  (" + stanceName(e.stance) + ")", f.x0 + U(10), f.y + U(5), F_M, en ? mixc(LORD_COL[clampi(e.color, 0, NLORDCOL - 1)], 0xffffff, 0.3f) : 0x7a8696);
-          G.text(std::string(diff == 0 ? "same level as you" : diff > 0 ? std::to_string(diff) + " above you" : std::to_string(-diff) + " below you") + "  -  " + std::to_string(nb) + " buildings  -  " + PERSONALITY[e.pers], f.x0 + U(10), f.y + U(32), F_S, C_DIM);
+          G.text(std::string(diff == 0 ? "same level as you" : diff > 0 ? std::to_string(diff) + " above you" : std::to_string(-diff) + " below you") + "  -  " + CIVS[clampi(e.civ, 0, NCIV - 1)].name + "  -  " + std::to_string(nb) + " buildings  -  " + PERSONALITY[e.pers], f.x0 + U(10), f.y + U(32), F_S, C_DIM);
           f.y += rh + U(6);
         }
         if (!any) flowPara(f, S.enemies.empty() ? "No rival lord has settled yet - one may appear in an empty quadrant." : "A rival lord lives in another quadrant. Send scouts (Explore) across the map to find them.", C_DIM, F_S); }
+      { bool anyG = false; for (int gi = 0; gi < (int)S.grudges.size(); gi++) {
+          const Grudge& gr = S.grudges[gi]; if (gr.enemyId >= 0 && !findEnemy(gr.enemyId)) continue;
+          if (!anyG) { flowTitle(f, "Revenge", C_GOLD, F_M); flowPara(f, "These lords have raided you. Tap one to see his base and strike back.", C_DIM, F_S); anyG = true; }
+          float rh = U(52); bool en = armyCount() > 0; uint32_t lc = LORD_COL[clampi(gr.color, 0, NLORDCOL - 1)];
+          if (uiButton(f.x0, f.y, f.maxW, rh, "", 0, en)) { startGrudge(gi); SDL_RenderSetClipRect(G.r, nullptr); return; }
+          G.circle(f.x0 + U(16), f.y + U(17), U(6.5f), lc); G.circle(f.x0 + U(16), f.y + U(17), U(3.8f), shadec(lc, 0.35f));
+          G.text(gr.name, f.x0 + U(32), f.y + U(5), F_M, en ? mixc(lc, 0xffffff, 0.3f) : 0x7a8696); G.text(std::string("Raided you  -  ") + CIVS[clampi(gr.civ, 0, NCIV - 1)].name + "  -  Town Center Lv" + std::to_string(gr.tc), f.x0 + U(32), f.y + U(28), F_S, C_DIM); f.y += rh + U(6);
+        } }
       flowTitle(f, "Barbarian Camps", C_GOLD, F_M);
       { int unl = campsUnlocked(); flowPara(f, std::to_string(unl) + " of " + std::to_string(NCAMP) + " camps unlocked (raise your Town Center for more). Clearing a camp again pays only 50%, then 25%, then 10% of its loot.", C_DIM, F_S);
         for (int i = 1; i <= std::min(NCAMP, unl + 1); i++) {
@@ -1101,7 +1134,7 @@ static void drawModal() {
         } }
       flowTitle(f, "Rival Lords", C_GOLD, F_M);
       if (uiButton(f.x0, f.y, f.maxW, U(52), "", 0, armyCount() > 0)) findRival(true);
-      G.text("Find a Rival", f.x0 + U(10), f.y + U(5), F_M, C_TXT); G.text("Ranked: wins raise Renown, losses lower it", f.x0 + U(10), f.y + U(28), F_S, C_DIM); f.y += U(58);
+      G.text("Find a Rival", f.x0 + U(10), f.y + U(5), F_M, C_TXT); G.text("Ranked: you see his base first; Next costs 30 gold. Wins raise Renown", f.x0 + U(10), f.y + U(28), F_S, C_DIM); f.y += U(58);
       if (flowBtn(f, "Close")) modal = M_NONE; break;
     }
     case M_SCOUT: {
@@ -1324,7 +1357,7 @@ static void drawPanel() {
   const BDef& d = bdef(b->type);
   float w = std::min(U(440), G.W - U(16)), x = (G.W - w) / 2, hh = panelContentH + U(24), y = G.H - U(94) - hh;
   panelBox(x, y, w, hh, 0, 0.97f); block(x, y - U(40), w, hh + U(40));
-  if (spritesReady()) { const SpriteDef* psp = isPiece(b->type) ? pieceSprite(b->type, isPiece(b->type) ? (b->type == B_SPIKE || b->type == B_OIL ? S.trapLvl : S.wallLvl) : b->lvl, b->x, b->y) : buildingSprite(b->type, std::max(1, b->lvl), std::min(ageOf(tcLvl()), 3), true); if (psp) drawIcon(*psp, x + w - U(78), y + U(34), U(76)); }
+  if (spritesReady()) { const SpriteDef* psp = isPiece(b->type) ? pieceSprite(b->type, isPiece(b->type) ? (b->type == B_SPIKE || b->type == B_OIL ? S.trapLvl : S.wallLvl) : b->lvl, b->x, b->y) : buildingSprite(b->type, std::max(1, b->lvl), std::min(ageOf(tcLvl()), 3), S.meta.civ); if (psp) drawIcon(*psp, x + w - U(78), y + U(34), U(76)); }
   { float xs = U(28); if (uiButton(x + w - xs - U(8), y + U(8), xs, xs, "X", 2, true, F_M)) { selId = -1; return; } }
   Flow f = flowAt(x + U(16), y + U(14), w - U(32));
   if (isPiece(b->type)) {
@@ -1538,10 +1571,33 @@ static void drawHud() {
     icon("icon_swords", x + w1 + U(34), pad + U(21), U(28)); G.textShadow(pc, x + w1 + U(50), pad + U(8), F_M, C_TXT);
     if (stars > lastStarsShown) lastStarsShown = (float)stars; if (sim.t < 0.2f) lastStarsShown = 0;
     for (int i = 0; i < 3; i++) { float sx = x + w1 + w2 + U(46) + i * U(26), sy = pad + U(21); if (i < stars) { G.star(sx, sy, U(11), 0xb07a14); G.star(sx, sy, U(9), 0xffd24a); } else { G.star(sx, sy, U(11), 0x1a130d); G.star(sx, sy, U(9), 0x3a2e22); } }
-    std::string hh = replaying ? "REPLAY  -  " + repCur.title + (B.sim.over ? "  (finished)" : "") : B.kind == K_DEFENCE ? "Your village is under attack!" : (sim.started ? "" : "Tap or hold the grass to deploy troops - anywhere outside the walls, even past the map edge (yellow zone)");
+    std::string hh = replaying ? "REPLAY  -  " + repCur.title + (B.sim.over ? "  (finished)" : "") : B.kind == K_DEFENCE ? "Your village is under attack!" : (sim.started ? "" : "Tap or hold the grass to attack - anywhere outside the walls, even past the map edge (yellow zone)");
     if (!hh.empty()) { float w = G.textSize(hh, F_M).x + U(40), hy = pad + U(48); G.shadowBox((G.W - w) / 2, hy, w, U(34), U(17), 0.35f, U(8)); G.gradRRect((G.W - w) / 2, hy, w, U(34), U(17), B.kind == K_DEFENCE ? 0xd2523e : 0xf6cc62, B.kind == K_DEFENCE ? 0x7e241a : 0xb07a1c, 1.f); G.text(hh, G.W / 2.f, hy + U(6), F_M, B.kind == K_DEFENCE ? 0xfff0e8 : 0x2b1806, A_CENTER); }
     float mw = U(206), mh = U(106), mx = G.W - pad - mw - U(6), my = G.H - pad - mh - U(2);
     drawMinimap(mx, my, mw, mh, true); rotButtons(mx, my, mw);
+    if (!replaying && B.kind != K_DEFENCE && !sim.started && !B.done && modal == M_NONE) {      // Clash-of-Clans style scouting: you are looking at the base itself
+      bool canNext = scout.rival && scout.enemyId < 0 && scout.grudge.empty();
+      float pw = std::min(U(350), std::max(U(260), (G.W - total) / 2 - pad * 2)), py = ((G.W - total) / 2 - pad * 2 >= U(250)) ? pad : pad + U(92), lh = G.textSize("Ag", F_S).y + U(3);
+      std::vector<std::string> notes;
+      if (scout.sneak) for (auto& l : wrap("You are not at war with this lord. The first troop you land breaks every treaty with him.", pw - U(24), F_S)) notes.push_back(l);
+      if (scout.fromSquad >= 0 || squadBattle) notes.push_back("Only your squad fights here.");
+      float ph = U(124) + notes.size() * lh + U(46) + (scout.rival && scout.diff != 0 ? lh : 0.f);
+      block(pad, py, pw, ph); panelBox(pad, py, pw, ph, 1, 0.96f);
+      float tx = pad + U(14), ty = py + U(10); uint32_t lc = scout.color >= 0 ? LORD_COL[clampi(scout.color, 0, NLORDCOL - 1)] : 0xc9684a;
+      G.circle(tx + U(6), ty + U(11), U(6.5f), lc); G.circle(tx + U(6), ty + U(11), U(3.8f), shadec(lc, 0.35f));
+      G.textShadow(scout.title, tx + U(20), ty, F_M, 0xf7e6bd);
+      ty += U(30);
+      std::string sub = scout.rival ? std::string(CIVS[clampi(scout.civ, 0, NCIV - 1)].name) + "  -  Town Center Lv" + std::to_string(scout.tc) : std::string("Barbarian camp  -  tier ") + std::to_string(scout.tc);
+      G.text(sub, tx, ty, F_S, C_DIM); ty += lh;
+      if (scout.rival && scout.diff != 0) { G.text(scout.diff > 0 ? std::to_string(scout.diff) + " level(s) above you: more loot, bigger Renown prize" : std::to_string(-scout.diff) + " level(s) below you: less loot, small prize", tx, ty, F_S, scout.diff > 0 ? C_OK : C_BAD); ty += lh; }
+      Cost shown; for (int i = 0; i < NRES; i++) shown.v[i] = (int)(scout.base.loot.v[i] * (scout.rival ? 0.2 * scout.lootF : campMul(scout.i)));
+      G.text("Loot:", tx, ty + U(2), F_S, C_TXT); drawCost(tx + U(46), ty + U(1), shown, A_LEFT, false); ty += U(28);
+      G.text("Renown +" + std::to_string(scout.win) + " win / -" + std::to_string(scout.lose) + " loss", tx, ty, F_S, C_TXT); ty += lh;
+      for (auto& l : notes) { G.text(l, tx, ty, F_S, C_BAD); ty += lh; }
+      float bw = (pw - U(36)) / (canNext ? 2.f : 1.f), by = py + ph - U(46); clickGate = true;
+      if (canNext && uiButton(tx, by, bw, U(36), "Next - 30 gold", 0, S.res[GOLD] >= 30, F_S)) { findRival(false); return; }
+      if (uiButton(tx + (canNext ? bw + U(8) : 0.f), by, bw, U(36), "Home", 2, true, F_S)) { cancelScout(); return; }
+    }
     if (replaying) {
       float by = G.H - pad - U(48), bx = pad, w = U(104); clickGate = true;
       if (uiButton(bx, by, w, U(48), rpPaused ? "Play" : "Pause", rpPaused ? 1 : 0)) rpPaused = !rpPaused; bx += w + U(8);
@@ -1686,7 +1742,7 @@ static void updateWorld(float dt) {
     audioTick(); }
   if (view == V_HOME) {
     S.t += dt * speedMul; econTick(dt * speedMul); raidCheck();
-    if (modal == M_NONE) { int asq, aen; if (squadArrival(asq, aen)) { if (findEnemy(aen)) { startEnemy(aen); scout.fromSquad = asq; toast("Your squad stands at the gates!"); } } }
+    if (modal == M_NONE) { int asq, aen; if (squadArrival(asq, aen)) { if (findEnemy(aen)) { startEnemy(aen, asq); toast("Your squad stands at the gates!"); } } }
     if (modal == M_NONE && !incoming) { SeasonResult sr; if (seasonCheck(sr)) { seasonRes = sr; modal = M_SEASON; audioPlay(SFX_FANFARE); saveGame(); } }
     saveT += dt; if (saveT > 5) { saveT = 0; saveGame(); }
     if (!buildMode) bmMoveId = -1;
@@ -1788,7 +1844,7 @@ static int smoke() {
   CHECK(br && isDone(*br), "barracks completed"); S.res[FOOD] = 600; S.res[GOLD] = 400; S.res[WOOD] = 600;
   if (br) for (int i = 0; i < 6; i++) trainUnit(*br, U_MILITIA);
   frames(300); CHECK(S.army[U_MILITIA] == 5, "militia trained up to the housing cap (5)"); LOG("army=%d", armyCount());
-  startBarb(1); shot("2_scout"); beginBattle(); int army0 = armyCount();
+  startBarb(1); CHECK(view == V_BATTLE && !B.sim.started && B.kind == K_BARB, "choosing a camp shows the base straight away, nothing deployed yet"); shot("2_scout"); beginBattle(); int army0 = armyCount();
   float spots[5][2] = {{3, 3}, {3.5f, 3}, {3, 3.5f}, {3.5f, 3.5f}, {4, 3}};
   for (auto& sp : spots) { deployRec(B.sel, sp[0], sp[1]); S.army[B.sel]--; }
   frames(100); shot("3_battle");
@@ -1797,7 +1853,9 @@ static int smoke() {
   { CHECK(!S.replays.empty() && S.replays[0].kind == 0 && !S.replays[0].deploys.empty(), "the attack was recorded as a replay"); int rs = -1, rpc = -1; replayRun(S.replays[0], rs, rpc); LOG("attack replay: live stars=%d pct=%d, replayed stars=%d pct=%d (%d deploys)", atk.stars, atk.pct, rs, rpc, (int)S.replays[0].deploys.size()); CHECK(rs == atk.stars && rpc == atk.pct, "replaying the attack reproduces it exactly"); }
   { int used = 0; for (int i = 0; i < U_COUNT; i++) used += usedCount[i]; CHECK(used > 0 && armyCount() + used == army0, "deployed troops do not come back"); LOG("troops used %d, army now %d (was %d)", used, armyCount(), army0); }
   LOG("stars=%d pct=%d loot wood=%d renown=%d army0=%d", atk.stars, atk.pct, atk.got.v[0], S.renown, army0); CHECK(S.renown > 0, "renown increased"); goHome();
-  findRival(true); shot("5_rival"); CHECK(modal == M_SCOUT && scout.rival, "rival scouted"); modal = M_NONE;
+  float gold0 = S.res[GOLD]; S.res[GOLD] = 100; findRival(true); frames(6); shot("5_rival"); CHECK(view == V_BATTLE && B.kind == K_RIVAL && scout.rival && !B.sim.started && scout.civ >= 0 && scout.civ < NCIV && scout.color >= 0, "a ranked rival is shown as a base with his own civ and colour"); LOG("rival civ %s colour %s", CIVS[scout.civ].name, LORD_COL_NAME[scout.color]);
+  { std::string t0 = scout.title; int a0 = armyCount(); findRival(false); CHECK(std::fabs(S.res[GOLD] - 70.f) < 0.5f && armyCount() == a0 && !B.sim.started, "Next costs 30 gold and shows another base"); LOG("next: %s -> %s", t0.c_str(), scout.title.c_str()); }
+  cancelScout(); CHECK(view == V_HOME && !recording, "Home leaves the scouted base without cost"); S.res[GOLD] = gold0;
   tcB().lvl = 2; S.nextRaid = S.t; S.shieldUntil = 0; speedMul = 5; battleSpeed = 4;
   for (int i = 0; i < 400 && view == V_HOME; i++) frames(1);
   CHECK(view == V_BATTLE && B.kind == K_DEFENCE, "NPC raid started"); frames(60); shot("6_defence");
@@ -1901,7 +1959,7 @@ static int smoke() {
   // rival bases get walls, gates and traps
   { bool wall = false, gate = false, trap = false; int tries = 0;
     for (; tries < 40 && !(wall && gate); tries++) { findRival(true); wall = gate = trap = false; for (auto& sb : scout.base.buildings) { if (sb.type == B_WALL) wall = true; if (sb.type == B_GATE) gate = true; if (sb.trap) trap = true; } }
-    CHECK(wall && gate, "rival bases have walls and gates"); LOG("rival with walls found after %d searches (tc=%d, traps=%d)", tries, scout.tc, (int)trap); modal = M_NONE; shot("19_walled_rival_scout"); }
+    CHECK(wall && gate, "rival bases have walls and gates"); LOG("rival with walls found after %d searches (tc=%d, traps=%d)", tries, scout.tc, (int)trap); modal = M_NONE; frames(4); shot("19_walled_rival_scout"); cancelScout(); }
   { buildMode = true; bmPaint = true; paintOn = true; bmType = B_WALL; bmx = 10; bmy = 8; S.res[WOOD] = 5000; frames(2); shot("20_paint_mode"); buildMode = false; bmPaint = false; }
   // ---------------- Imperial Age scenario
   speedMul = 20; tcB().lvl = 9; S.nextRaid = S.t + 1e9; S.shieldUntil = S.t + 1e9;
@@ -1954,7 +2012,7 @@ static int smoke() {
     Sim sp = sm; sp.units.clear(); sp.deploy(U_MILITIA, 3.0f, 3.0f, false); sp.deploy(U_MILITIA, 3.0f, 17.0f, false); sp.step(0.05f);
     int h2 = 0; for (auto& u : sp.units) if (u.hp < u.maxhp) h2++; CHECK(h2 == 0, "a lone raider outside the line is not hit");
     bool scBase = false; for (int i = 0; i < 80 && !scBase; i++) { findRival(true); if (scout.tc >= 7) for (auto& sb : scout.base.buildings) if (sb.type == B_SCORPION) scBase = true; }
-    CHECK(scBase, "Castle/Imperial rival bases have scorpions"); modal = M_NONE;
+    CHECK(scBase, "Castle/Imperial rival bases have scorpions"); modal = M_NONE; cancelScout();
     tcB().lvl = 9; { int sx, sy; bool ok = nearSpot(B_SCORPION, 15, 22, sx, sy); CHECK(ok, "free spot for a scorpion"); if (ok) { CHECK(smokePlaceAt(B_SCORPION, sx, sy), "scorpion placed in the village"); speedMul = 20; frames(120); speedMul = 1; shot("21_scorpion_village"); } }
   }
   {
@@ -2033,7 +2091,7 @@ static int smoke() {
       S.t = saveT; S.renown = sr; tcB().lvl = lv; S.enemies = savedEn; LOG("raid size at renown 0: avg %.1f (min %d max %d); at 4500: avg %.1f; attacker level diff %d..%d", sumLo / 60, mn, mx, sumHi / 60, dmin, dmax);
       CHECK(sumHi > sumLo * 1.6, "raids grow with your Renown"); CHECK(mx >= mn * 2 && dmin <= -1 && dmax >= 1, "raids vary a lot in size and attacker level");
       CHECK(winFactor(2) > winFactor(0) && winFactor(0) > winFactor(-2) && loseFactor(-2) > loseFactor(0) && loseFactor(0) > loseFactor(2) && lootFactor(2) > lootFactor(-2), "Renown and loot depend on the relative Town Center level");
-      int sd = 0; for (int i = 0; i < 40; i++) { findRival(true); sd = std::max(sd, std::abs(scout.tc - tcLvl())); modal = M_NONE; } CHECK(sd <= 2, "rivals are always within two Town Center levels"); }
+      int sd = 0; for (int i = 0; i < 40; i++) { findRival(true); sd = std::max(sd, std::abs(scout.tc - tcLvl())); modal = M_NONE; } CHECK(sd <= 2, "rivals are always within two Town Center levels"); cancelScout(); }
     // resource camp look
     { int ids[3] = {-1, -1, -1}; BType ty[3] = {B_LUMBER, B_GOLDCAMP, B_STONECAMP}; int ox, oy; int base[3][2] = {{3, 24}, {7, 24}, {11, 24}}; int tcl = tcB().lvl; tcB().lvl = 3;
       for (int i = 0; i < 3; i++) if (nearSpot(ty[i], base[i][0], base[i][1], ox, oy)) { Bld& nb = addB(ty[i], ox, oy, 1); nb.workers = i; ids[i] = nb.id; }
@@ -2053,7 +2111,7 @@ static int smoke() {
       const char* over = hx2 > -90 ? placeBlockReason(B_HOUSE, hx2, hy2, -1, true) : nullptr; CHECK(over != nullptr && std::strstr(over, "limit") != nullptr, "outposts have their own limit per building type");
       { std::vector<int> rm; for (auto& b : S.b) if (b.type == B_HOUSE && !inHome(b.x + 1.f, b.y + 1.f)) rm.push_back(b.id); for (int id : rm) demolish(id); }
       tcB().lvl = lv;
-      Enemy* e0 = &S.enemies[0]; int eid = e0->id; startEnemy(eid); CHECK(modal == M_SCOUT && scout.enemyId == eid && !scout.base.buildings.empty(), "tapping a rival lord opens the attack screen"); S.army[U_MILITIA] += 5; beginBattle();
+      Enemy* e0 = &S.enemies[0]; int eid = e0->id; startEnemy(eid); CHECK(view == V_BATTLE && B.kind == K_RIVAL && scout.enemyId == eid && !scout.base.buildings.empty() && !B.sim.started && scout.civ == e0->civ && battleLordColor == e0->color, "choosing a rival lord shows his base, in his civ and colour"); S.army[U_MILITIA] += 5; beginBattle();
       int defs = 0; for (auto& u : B.sim.units) if (u.def) defs++; CHECK(defs >= 2, "the rival lord defends himself with troops"); LOG("rival lord %s TC%d: %d defenders, %d buildings", e0->name.c_str(), e0->tc, defs, (int)scout.base.buildings.size());
       size_t nb0 = scout.base.buildings.size(); for (size_t i = 0; i < 2 && i < B.sim.b.size(); i++) B.sim.b[i].dead = true; B.sim.over = true; finishAttack(); e0 = findEnemy(eid);
       CHECK(e0 != nullptr && e0->dead.size() >= 2 && enemyBase(*e0).buildings.size() <= nb0 - 2, "buildings you destroy stay destroyed"); goHome();
@@ -2064,7 +2122,7 @@ static int smoke() {
       saveGame(); Enemy sv = S.enemies[0]; S.enemies.clear(); bool lg = loadGame(); LOG("load: %d, enemies %d name '%s' vs '%s' seed %u vs %u tc %d vs %d", (int)lg, (int)S.enemies.size(), S.enemies.empty() ? "" : S.enemies[0].name.c_str(), sv.name.c_str(), S.enemies.empty() ? 0u : S.enemies[0].seed, sv.seed, S.enemies.empty() ? 0 : S.enemies[0].tc, sv.tc); CHECK(lg && S.enemies.size() >= 1 && S.enemies[0].name == sv.name && S.enemies[0].seed == sv.seed && S.enemies[0].tc == sv.tc, "rival lords are saved");
       { std::ifstream sf("smoke_save.txt", std::ios::binary); std::string txt((std::istreambuf_iterator<char>(sf)), std::istreambuf_iterator<char>()); sf.close();
         size_t rp = txt.find("RPL "); size_t cut = rp == std::string::npos ? std::string::npos : txt.rfind('\n', txt.rfind('\n', rp) - 1);
-        CHECK(txt.compare(0, 5, "DOK14") == 0 && cut != std::string::npos, "the save is the current version");
+        CHECK(txt.compare(0, 5, "DOK15") == 0 && cut != std::string::npos, "the save is the current version");
         if (cut != std::string::npos) { std::string old = "DOK6" + txt.substr(5, cut + 1 - 5); std::ofstream of("smoke_old.txt", std::ios::binary | std::ios::trunc); of << old; of.close(); std::string keep = g_savePath; g_savePath = "smoke_old.txt";
           bool okOld = loadGame(); g_savePath = keep; CHECK(okOld && S.enemies.size() >= 1 && S.replays.empty() && S.fog.size() == (size_t)WORLD * WORLD, "a save from before the four quadrants loads and gets a rival lord"); } }
       Pt c0 = iso(15.f, 15.f); (void)c0;
@@ -2087,7 +2145,7 @@ static int smoke() {
         S.res[GOLD] = 0; for (int i = 0; i < 600; i++) { S.t += 0.1; econTick(0.1f); } LOG("trade route: %.0f gold in a minute", S.res[GOLD]); CHECK(S.res[GOLD] > 20, "the trade route pays gold");
         for (int i = 0; i < 60 && e->stance < ST_ALLY; i++) { S.t += 300; diploPropose(eid, DP_ALLY, msg); } CHECK(e->stance == ST_ALLY, "an alliance can be agreed");
         { int allyUnits = 0; for (int i = 0; i < 5; i++) { S.t += 41; Sim sm = makeDefenceSim(); for (auto& u : sm.units) if (u.def) allyUnits++; CHECK(sm.atkEnemy != eid, "an ally never raids you"); } e->stance = ST_PEACE; int peaceUnits = 0; for (int i = 0; i < 5; i++) { S.t += 41; Sim sm = makeDefenceSim(); for (auto& u : sm.units) if (u.def) peaceUnits++; } e->stance = ST_ALLY; CHECK(allyUnits > peaceUnits, "allies send troops to defend your village"); }
-        S.betrayals = 0; startEnemy(eid); CHECK(scout.sneak, "attacking an ally is a sneak attack"); S.army[U_MILITIA] += 3; beginBattle(); e = findEnemy(eid); CHECK(e->stance == ST_WAR && S.betrayals == 2, "a treacherous attack ends the alliance and costs you trust"); goHome(); CHECK(diploChance(*e, DP_PEACE) < 0.7f, "betrayal makes every lord less willing to deal"); S.betrayals = 0;
+        S.betrayals = 0; startEnemy(eid); CHECK(scout.sneak, "attacking an ally is a sneak attack"); S.army[U_MILITIA] += 3; beginBattle(); e = findEnemy(eid); CHECK(e->stance == ST_ALLY, "the treaty holds while you are only looking"); deployRec(U_MILITIA, -2.f, 15.f); e = findEnemy(eid); CHECK(e->stance == ST_WAR && S.betrayals == 2, "a treacherous attack ends the alliance and costs you trust"); goHome(); CHECK(diploChance(*e, DP_PEACE) < 0.7f, "betrayal makes every lord less willing to deal"); S.betrayals = 0;
         demolish(mkid); tcB().lvl = lvB; }
       e->stance = ST_WAR; e->pers = 1; e->trust = 0; }
     { Bld& mon = addB(B_MONASTERY, 3, 6, 1); int mid = mon.id; S.relics.push_back({S.aid++, 9.5f, 9.5f}); size_t nr0 = S.relics.size(); int held0 = S.relicsHeld; S.army[U_MONK] = 2; S.res[GOLD] = 100;
@@ -2182,7 +2240,7 @@ static int smoke() {
       focus3(15.f, 15.f, 1.0f); vTarget = 1.5707963f; setViewAngle(vTarget); frames(6); shot("39_village_rot90"); vTarget = 0; setViewAngle(0); focus3(-6.f, 10.f, 1.15f); frames(8); shot("32_outside");
       vTarget = 1.5707963f; setViewAngle(vTarget); frames(6); shot("37_rotated_90"); vTarget = 3.1415926f; setViewAngle(vTarget); frames(6); shot("38_rotated_180"); setViewAngle(0); vTarget = 0;
       explSel = -1; S.expl.clear(); modal = M_EXPLORE; frames(14); shot("33_explore_menu"); modal = M_RAID; modalScroll = 0; frames(14); shot("34_raid_menu"); modal = M_OUTPOST; frames(14); shot("35_outpost_result"); modal = M_NONE;
-      { startBarb(1); beginBattle(); battleSpeed = 1; S.army[U_MILITIA] = 12; B.sel = U_MILITIA; int a0 = S.army[U_MILITIA]; Pt hp = iso(-3.f, 15.f); in.mx = in.px = hp.x; in.my = in.py = hp.y; in.down = true; in.dragged = false; in.uiGesture = false; frames(24); in.down = false; frames(1);
+      { startBarb(1); beginBattle(); centerCamera(); battleSpeed = 1; S.army[U_MILITIA] = 12; B.sel = U_MILITIA; int a0 = S.army[U_MILITIA]; Pt hp = iso(-3.f, 15.f); in.mx = in.px = hp.x; in.my = in.py = hp.y; in.down = true; in.dragged = false; in.uiGesture = false; frames(24); in.down = false; frames(1);
         LOG("hold deploy: %d troops released while holding", a0 - S.army[U_MILITIA]); CHECK(a0 - S.army[U_MILITIA] >= 4, "holding the pointer keeps deploying troops"); goHome(); centerCamera(); battleSpeed = 1; }
       startBarb(1); beginBattle(); battleSpeed = 1; frames(10); shot("36_deploy_zone"); float t1 = B.sim.t; battleSpeed = 4; frames(10); float t4 = B.sim.t - t1;
       LOG("battle clock: x1 %.2fs, x4 %.2fs", t1, t4); CHECK(t1 > 0.3f && t4 > t1 * 3.6f && t4 < t1 * 4.4f, "battle speed x4 runs the battle clock four times faster"); battleSpeed = 2; frames(3); shot("40_battle_speed"); battleSpeed = 1; goHome(); centerCamera(); }
@@ -2207,18 +2265,29 @@ static int smoke() {
     startReplay(0); frames(40); CHECK(replaying && view == V_BATTLE && RP.step > 20, "the replay viewer plays"); shot("41_replay"); modal = M_NONE; replaying = false; goHome(); modal = M_REPLAYS; frames(14); shot("42_replay_list"); modal = M_NONE; }
   { diploEnemy = S.enemies[0].id; diploMsg = "Lord X considers your offer..."; modal = M_DIPLO; frames(10); shot("50_diplomacy"); modal = M_NONE;
     S.relics.push_back({S.aid++, 6.5f, 20.5f}); { float gx = 6.5f, gy = 20.5f, zm = 2.0f; cam.zoom = cam.zt = zm; cam.x = G.W / 2.f - (gx - gy) * TW / 2 * zm; cam.y = G.H / 2.f - (gx + gy) * TH / 2 * zm; cam.vx = cam.vy = 0; } frames(6); shot("51_relic"); centerCamera(); }
+  {   // rival civs, revenge
+    bool civOk = true; for (auto& en : S.enemies) if (en.civ < 0 || en.civ >= NCIV) civOk = false; CHECK(civOk && !S.enemies.empty(), "every rival lord has a civilization");
+    { std::set<int> civs, cols; for (int i = 0; i < 30; i++) { S.enemies.clear(); S.aid += 7; for (int k = 0; k < 80 && S.enemies.empty(); k++) { S.t += 37; S.enemyCheck = S.t - 1; econTick(0.1f); } if (!S.enemies.empty()) { civs.insert(S.enemies[0].civ); cols.insert(S.enemies[0].color); } }
+      LOG("distinct rival civs seen %d, colours %d", (int)civs.size(), (int)cols.size()); CHECK(civs.size() >= 3 && cols.size() >= 3, "rival lords get random civilizations and colours"); }
+    if (S.enemies.empty()) { for (int k = 0; k < 80 && S.enemies.empty(); k++) { S.t += 37; S.enemyCheck = S.t - 1; econTick(0.1f); } }
+    S.grudges.clear(); S.res[WOOD] = S.res[FOOD] = 500; S.t += 3000; { Report rr = headlessRaid(); (void)rr; } CHECK(!S.grudges.empty(), "a raid on your village puts the raider on your revenge list"); Grudge g0 = S.grudges[0]; LOG("grudge: %s (enemy %d) tc %d civ %d", g0.name.c_str(), g0.enemyId, g0.tc, g0.civ);
+    saveGame(); S.grudges.clear(); CHECK(loadGame() && !S.grudges.empty() && S.grudges[0].name == g0.name && S.grudges[0].civ == g0.civ, "the revenge list is saved"); S.army[U_MILITIA] += 4;
+    startGrudge(0); CHECK(view == V_BATTLE && !B.sim.started && battleCiv == (g0.enemyId >= 0 && findEnemy(g0.enemyId) ? findEnemy(g0.enemyId)->civ : g0.civ) && !scout.grudge.empty(), "revenge shows the attacker's base"); frames(8); shot("55_revenge_scout");
+    for (auto& sb : B.sim.b) sb.dead = true; B.sim.over = true; size_t ng0 = S.grudges.size(); finishAttack(); CHECK(S.grudges.size() == ng0 - 1, "taking revenge clears the grudge"); goHome(); modal = M_RAID; modalScroll = 0; frames(10); shot("56_raid_menu"); modal = M_NONE;
+  }
   {   // restart and prestige
     int pr0 = S.meta.prestige; tcB().lvl = MAXTC; CHECK(prestigeAvailable(), "prestige opens at the maximum Town Center"); tcB().lvl = 5; CHECK(!prestigeAvailable(), "and not before");
     { // every civilization: sprites load, the village is drawn in its style, and the choice survives save/load
       static const char* CODES[7] = {"", "sl", "fr", "ce", "ja", "sp", "mo"};
       for (int k = 1; k < NCIV; k++) {
         S.meta.civ = k; syncCiv(); char nm[40]; std::snprintf(nm, sizeof nm, "%s_townhall_5", CODES[k]);
-        CHECK(civSpritesLoaded(CODES[k]) && findSprite(nm) != nullptr && buildingSprite(B_TOWNHALL, 5, 2, true) == findSprite(nm) && buildingSprite(B_TOWNHALL, 5, 2, false) == findSprite("townhall_5"), "the civilization's own Town Center sprite is used for the player only");
-        CHECK(buildingSprite(B_LUMBER, 1, 1, true) == findSprite("lumber_1") && buildingSprite(B_HOUSE, 1, 1, true) == findSprite((std::string(CODES[k]) + "_house_1").c_str()), "buildings without a civ variant keep the stock sprite");
+        CHECK(civSpritesLoaded(CODES[k]) && findSprite(nm) != nullptr && buildingSprite(B_TOWNHALL, 5, 2, k) == findSprite(nm) && buildingSprite(B_TOWNHALL, 5, 2, 0) == findSprite("townhall_5"), "the civilization's own Town Center sprite is used for the player only");
+        CHECK(buildingSprite(B_LUMBER, 1, 1, k) == findSprite("lumber_1") && buildingSprite(B_HOUSE, 1, 1, k) == findSprite((std::string(CODES[k]) + "_house_1").c_str()), "buildings without a civ variant keep the stock sprite");
         centerCamera(); frames(8); shot((std::string("civ_") + CIVS[k].name).c_str());
         if (k == 1) { saveGame(); S.meta.civ = 0; CHECK(loadGame() && S.meta.civ == 1, "the chosen civilization is saved"); }
       }
-      S.meta.civ = 0; syncCiv(); CHECK(!civSpritesLoaded("mo") && !civSpritesLoaded("sl") && findSprite("mo_townhall_5") == nullptr, "leaving a civilization frees its sprites"); frames(4);
+      S.meta.civ = 0; { auto sv = S.enemies; for (auto& en : S.enemies) en.civ = 0; syncCiv(); CHECK(!civSpritesLoaded("mo") && !civSpritesLoaded("sl") && findSprite("mo_townhall_5") == nullptr, "leaving a civilization frees its sprites");
+      if (S.enemies.empty()) S.enemies.push_back(Enemy()); for (auto& en : S.enemies) { en.civ = 5; en.seen = true; } syncCiv(); CHECK(civSpritesLoaded("sp"), "a rival lord you have seen keeps his civilization loaded"); S.enemies = sv; } syncCiv(); frames(4);
     }
     restartGame(true, 4, BOON_HARDY); CHECK(S.meta.prestige == pr0 + 1 && S.meta.civ == 4 && S.meta.boon == BOON_HARDY && tcLvl() == 1 && S.enemies.size() == 1 && S.enemies[0].tc == 1 && !S.seenIntro && modal == M_INTRO, "ascending starts a new realm, keeps prestige and applies the chosen civ and reward");
     CHECK(civSpritesLoaded("ja") && !outlineOwned() && outlineChoiceOpen(S.meta.prestige + 1), "the gold outline is still on offer for the next ascension"); int q0 = S.enemies[0].quad;
