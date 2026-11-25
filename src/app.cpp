@@ -1102,6 +1102,9 @@ static void drawModal() {
       flowTitle(f, "Raid", C_TXT);
       std::string a; for (int i = 0; i < U_COUNT; i++) if (S.army[i]) a += std::string(udef(i).name) + " x" + std::to_string(S.army[i]) + "   ";
       flowPara(f, "Army: " + (a.empty() ? std::string("none - train troops at the Barracks") : a));
+      flowTitle(f, "Ranked Rivals", C_GOLD, F_M);
+      if (uiButton(f.x0, f.y, f.maxW, U(52), "", 0, armyCount() > 0)) findRival(true);
+      G.text("Find a Rival", f.x0 + U(10), f.y + U(5), F_M, C_TXT); G.text("Ranked: you see his base first; Next costs 30 gold. Wins raise Renown", f.x0 + U(10), f.y + U(28), F_S, C_DIM); f.y += U(58);
       flowTitle(f, "Rival lords on the map", C_GOLD, F_M);
       { bool any = false; for (auto& e : S.enemies) {
           if (!enemyDiscovered(e)) continue; any = true; float rh = U(58); bool en = armyCount() > 0;
@@ -1132,9 +1135,6 @@ static void drawModal() {
           Cost shown; for (int k = 0; k < NRES; k++) shown.v[k] = (int)(g.loot.v[k] * mul);
           G.text(sub, f.x0 + U(10), f.y + U(28), F_S, C_DIM); drawCost(f.x0 + f.maxW - U(10), f.y + U(16), shown, A_RIGHT, false); f.y += rh + U(6);
         } }
-      flowTitle(f, "Rival Lords", C_GOLD, F_M);
-      if (uiButton(f.x0, f.y, f.maxW, U(52), "", 0, armyCount() > 0)) findRival(true);
-      G.text("Find a Rival", f.x0 + U(10), f.y + U(5), F_M, C_TXT); G.text("Ranked: you see his base first; Next costs 30 gold. Wins raise Renown", f.x0 + U(10), f.y + U(28), F_S, C_DIM); f.y += U(58);
       if (flowBtn(f, "Close")) modal = M_NONE; break;
     }
     case M_SCOUT: {
