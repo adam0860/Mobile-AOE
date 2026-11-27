@@ -15,3 +15,4 @@ art/preview*.png
 third_party/**/build/
 art/renders_civ/
 art/_t/
+releases/

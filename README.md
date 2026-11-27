@@ -133,5 +133,14 @@ $env:JAVA_HOME="C:\Program Files\Android\Android Studio\jbr"
 ```
 APK: `android/app/build/outputs/apk/debug/app-debug.apk`. Install with `adb install -r`.
 
+## Download
+The latest Android build is attached to the newest GitHub Release (APKs are no longer kept in the repo):
+[DawnOfKings-debug.apk](https://github.com/adam0860/Mobile-AOE/releases/latest/download/DawnOfKings-debug.apk).
+To publish a new build:
+```powershell
+Copy-Item android\app\build\outputs\apk\debug\app-debug.apk releases\DawnOfKings-debug.apk
+gh release create vYYYY.MM.DD releases\DawnOfKings-debug.apk --title "Dawn of Kings - <date>" --notes "<what changed>" --latest
+```
+
 ## Controls
 Drag = pan, wheel / pinch = zoom, tap = select / place / deploy troops.
