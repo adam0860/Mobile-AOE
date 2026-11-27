@@ -9,6 +9,7 @@ struct Bld {
   int id; BType type; int x, y, w, h; int lvl; int workers;
   bool building; float bStart, bEnd; int bTo; std::vector<QItem> q;
   int status; float acc; // status: 0 none,1 idle,2 work,3 full,4 no nodes
+  float dmg = 0;          // damage taken from a rival's warband (outposts; mends slowly, not saved)
 };
 struct Node { int x, y; NodeType type; float amt, max, respawn; };
 enum AType { A_DEER, A_BOAR, A_WOLF };
@@ -19,6 +20,8 @@ struct Relic { int id; float x, y; };
 struct SqUnit { int type; float hp; };
 enum SquadMode { SQ_FREE, SQ_ESCORT, SQ_GUARD, SQ_ATTACK };
 struct Squad { int id = 0; std::vector<SqUnit> u; float x = 0, y = 0, tx = 0, ty = 0; bool go = false, recall = false; int mode = SQ_FREE, target = -1; float gx = 0, gy = 0, aph = 0, fight = 0; int face = 3; };
+// a rival lord's warband marching on your outposts in real time (not saved: lords only act while you play)
+struct Warband { int id = 0, enemyId = -1, color = 0, tc = 1, state = 0, face = 3, lost = 0, target = -1; std::vector<SqUnit> u; float x = 0, y = 0, tx = 0, ty = 0, aph = 0, fight = 0, life = 0; std::string lord; };   // state 0 marching, 1 attacking, 2 going home
 struct Grudge { std::string name; int enemyId = -1, tc = 1; uint32_t seed = 0; int civ = 0, color = 0; };   // someone who raided you: you may attack their base (revenge)
 struct Meta { int prestige = 0, points = 0; uint32_t unlocked = 0; int civ = 0, boon = 0; bool outlineOn = false; };    // survives restarts (unlocked bit 0 = gold outline owned; civ 0 = Byzantines; boon = reward for this realm)
 enum Stance { ST_WAR, ST_PEACE, ST_TRADE, ST_ALLY };
@@ -70,6 +73,7 @@ struct State {
   int aid = 1;
   std::vector<Squad> squads;
   std::vector<Grudge> grudges;
+  std::vector<Warband> bands; double outShieldUntil = 0, bandCheck = 0, outLastLoss = -1e9; int outStreak = 0;     // outpost raids by rival lords + the outpost shield
   Meta meta; std::vector<Relic> relics; int relicsHeld = 0, betrayals = 0; double relicCheck = 0; std::vector<uint8_t> vis;   // vis: tiles you can currently see (not saved)
   std::vector<Enemy> enemies; double enemyCheck = 0;   // rival lords on the map (quadrant 1..3; yours is 0)
   std::deque<Replay> replays;                    // newest first, at most 10
@@ -209,6 +213,12 @@ bool outlineOwned();
 bool outlineChoiceOpen(int prestigeAfter);                      // the gold outline is offered from the second ascension, once
 const char* civCode(int civ);                                   // "" for the Byzantines (stock sprites)
 bool prestigeAvailable();                                      // Town Center at the maximum level
+// ---- lords keep their own hours: they only level up and attack while you are playing, and not while they are 'offline' themselves
+bool lordAwake(const Enemy& e);
+extern bool g_offline, g_bandsOff;                             // g_offline: true while the game catches up on the time it was closed
+float bandHpFrac(const Warband& w);
+float bandSpeed(const Warband& w);
+void launchBand(int enemyId, int targetId = -1);               // send a warband at your outposts (normally chosen by the lords themselves)
 // ---- barbarian camps ----
 float campMul(int camp);                 // loot multiplier: 1, then 0.5, 0.25, 0.1 for repeated clears
 int campsUnlocked();

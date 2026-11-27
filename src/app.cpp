@@ -47,7 +47,7 @@ static int diploEnemy = -1; static std::string diploMsg; static bool armRestart 
 constexpr int REW_OUTLINE = 5; static int ascCiv = 0, ascReward = 0;      // ascension screen: chosen civilization and reward (1..4 = boons, 5 = gold outline)
 static unsigned loadedCivs = 0;                                             // bit k set = civilization k's building sprites are in memory
 static int battleCiv = 0;                                                   // civilization of the base being attacked
-static bool treacheryPending = false;                                       // attacking a lord you are at peace with: the treaty breaks when the first troop lands
+static bool treacheryPending = false, shieldBreakPending = false;                                       // attacking a lord you are at peace with: the treaty breaks when the first troop lands
 static Squad heldSquad; static bool squadHeld = false;
 static void syncCiv() {                                                     // keep the civ sprite sets (yours + the lords you have seen + the base being fought) and the gold outline in step with the game state
   if (!spritesReady()) return;
@@ -72,6 +72,7 @@ static ReplayPlayer RP; static Replay repCur, rec;
 static bool replaying = false, recording = false, rpPaused = false; static float rpSpeed = 1, battleAcc = 0; static int bSteps = 0;
 static void deployRec(UType t, float x, float y, bool def = false) {
   if (!def && treacheryPending) { treacheryPending = false; diploWar(scout.enemyId, true); }      // the first troop to land breaks the treaty
+  if (!def && shieldBreakPending) { shieldBreakPending = false; if (S.shieldUntil > S.t || S.outShieldUntil > S.t) { S.shieldUntil = std::min(S.shieldUntil, S.t); S.outShieldUntil = std::min(S.outShieldUntil, S.t); toast("You attacked another lord - your shields are gone"); } }      // attacking a lord (not barbarians) drops your shields
   if (recording && !def) rec.deploys.push_back({bSteps, (int)t, x, y}); if (!def) usedCount[t]++; B.sim.deploy(t, x, y, def);
 }
 static struct { double away = 0; Cost gain; Report rep; bool raided = false, outpost = false; } welcome;
@@ -576,9 +577,9 @@ static void drawHome() {
       for (auto& sb : ec.b) {
         if (sb.trap || !isExplored((int)sb.x + ox, (int)sb.y + oy) || !onScreen(sb.x + ox + sb.w / 2.f, sb.y + oy + sb.h / 2.f, 160 * cam.zoom + 60)) continue;
         BView v{sb.type, sb.lvl, sb.x + ox, sb.y + oy, sb.w, sb.h, 1, false, false, 0, e.id == enemySel && sb.hq, 0}; v.civ = e.civ; bool hq = sb.hq;
-        items.push_back({dep(v.x + v.w / 2.f, v.y + v.h / 2.f), [v, eage, hq, label, tint, lcol] {
+        int eid = e.id; items.push_back({dep(v.x + v.w / 2.f, v.y + v.h / 2.f), [v, eage, hq, label, tint, lcol, eid] {
           setSpriteTint(tint); drawBuilding(v, eage); setSpriteTint(0xffffff);
-          if (hq) { Pt c = iso(v.x + v.w / 2.f, v.y + v.h / 2.f); const SpriteDef* sp = buildingSprite(v.type, v.lvl, eage, v.civ); float ty = c.y - (sp ? sp->ay / sp->scale * cam.zoom : 40.f) - U(34); float lw = G.textSize(label, F_S).x; G.circle(c.x - lw / 2 - U(9), ty + U(8), U(5.5f), lcol); G.circle(c.x - lw / 2 - U(9), ty + U(8), U(3.2f), shadec(lcol, 0.35f)); G.textShadow(label, c.x, ty, F_S, mixc(lcol, 0xffffff, 0.35f), A_CENTER); }
+          if (hq) { Pt c = iso(v.x + v.w / 2.f, v.y + v.h / 2.f); const SpriteDef* sp = buildingSprite(v.type, v.lvl, eage, v.civ); float ty = c.y - (sp ? sp->ay / sp->scale * cam.zoom : 40.f) - U(34); float lw = G.textSize(label, F_S).x; G.circle(c.x - lw / 2 - U(9), ty + U(8), U(5.5f), lcol); G.circle(c.x - lw / 2 - U(9), ty + U(8), U(3.2f), shadec(lcol, 0.35f)); G.textShadow(label, c.x, ty, F_S, mixc(lcol, 0xffffff, 0.35f), A_CENTER); if (const Enemy* le = findEnemy(eid)) { bool on = lordAwake(*le); G.circle(c.x + G.textSize(label, F_S).x / 2 + U(10), ty + U(8), U(4.5f), on ? 0x6fe06f : 0x707070); } }
         }});
       }
     }
@@ -612,6 +613,24 @@ static void drawHome() {
           drawUnitSpr(qp->x + ox, qp->y + oy, ty, false, dirv, fr); }
         Pt p = iso(qp->x, qp->y); bar(p.x, p.y - 74 * cam.zoom, U(34), squadHpFrac(*qp), 0x6fe06f); G.textShadow("x" + std::to_string(n), p.x, p.y - 74 * cam.zoom - U(18), F_S, 0xe8f0ff, A_CENTER);
       }});
+    }
+    if (!S.bands.empty()) applyEnemyPalette(S.bands[0].color);                  // their troops wear the lord's colour
+    for (auto& w : S.bands) {
+      if (!onScreen(w.x, w.y, 140 * cam.zoom + 60)) continue; const Warband* wp = &w;
+      items.push_back({dep(w.x, w.y), [wp] {
+        int n = (int)wp->u.size(); if (n == 0) return; int show = std::min(8, n); int dirv = ((wp->face - (int)std::lround(vAng / 0.785398f)) % 8 + 8) % 8; bool mv = wp->fight <= 0;
+        std::vector<std::pair<float, int>> ord; for (int k = 0; k < show; k++) { float ox = ((k % 3) - 1) * 0.6f, oy = ((k / 3) - 1.f) * 0.6f; ord.push_back({dep(wp->x + ox, wp->y + oy), k}); } std::sort(ord.begin(), ord.end());
+        for (auto& od : ord) { int k = od.second; float ox = ((k % 3) - 1) * 0.6f, oy = ((k / 3) - 1.f) * 0.6f; int ty = wp->u[k * n / show].type;
+          int fr = !mv ? 7 + (int)(nowSec() * 6.f + k) % 3 : 1 + (int)((wp->aph + k * 0.17f - std::floor(wp->aph + k * 0.17f)) * 6) % 6;
+          drawUnitSpr(wp->x + ox, wp->y + oy, ty, true, dirv, fr); }
+        Pt p = iso(wp->x, wp->y); uint32_t lc = LORD_COL[clampi(wp->color, 0, NLORDCOL - 1)];
+        bar(p.x, p.y - 78 * cam.zoom, U(40), bandHpFrac(*wp), 0xe25555); G.textShadow(wp->lord + "  x" + std::to_string(n), p.x, p.y - 78 * cam.zoom - U(18), F_S, mixc(lc, 0xffffff, 0.35f), A_CENTER);
+      }});
+    }
+    for (auto& b : S.b) if (b.dmg > 0 && onScreen(b.x + b.w / 2.f, b.y + b.h / 2.f, 140 * cam.zoom + 60)) {      // outposts under attack burn and show their health
+      const Bld* bp = &b; items.push_back({dep(b.x + b.w / 2.f, b.y + b.h / 2.f) + 0.05f, [bp] { float mh = makeSimB(bp->type, std::max(1, bp->lvl), 0, 0).maxhp; Pt p = iso(bp->x + bp->w / 2.f, bp->y + bp->h / 2.f); bar(p.x, p.y - 64 * cam.zoom, U(40), 1.f - bp->dmg / std::max(1.f, mh), 0xf0c040); }});
+      if (frand() < frameDt * 4.f) fxSpawn(FX_SMOKE, b.x + frand() * b.w, b.y + frand() * b.h, 14, 1);
+      if (b.dmg > 0 && frand() < frameDt * 3.f) fxSpawn(FX_FLAME, b.x + frand() * b.w, b.y + frand() * b.h, 6, 1);
     }
     for (auto& e : S.expl) {
       const Explorer* ep = &e;
@@ -757,7 +776,7 @@ static void beginBattle() {
   B.sim.mul[0] = techMul(); B.sim.mul[1] = enemyMul(scout.tc);
   B.kind = scout.rival ? K_RIVAL : K_BARB; B.done = false; B.sel = U_MILITIA;
   for (int i = 0; i < U_COUNT; i++) if (S.army[i] > 0) { B.sel = (UType)i; break; }
-  battleLordColor = scout.color; battleCiv = scout.civ; treacheryPending = scout.sneak && scout.enemyId >= 0;
+  battleLordColor = scout.color; battleCiv = scout.civ; treacheryPending = scout.sneak && scout.enemyId >= 0; shieldBreakPending = scout.rival;
   if (scout.enemyId >= 0) { if (Enemy* en = findEnemy(scout.enemyId)) { addEnemyDefenders(B.sim, *en); battleLordColor = en->color; battleCiv = en->civ; } }
   applyEnemyPalette(battleLordColor);
   B.sim.spawnGarrisons();
@@ -798,6 +817,7 @@ static void startGrudge(int idx) {                                          // r
   int diff = g.tc - tcLvl(); scout.diff = diff; scout.lootF = lootFactor(diff); scout.winF = winFactor(diff); scout.win = std::max(1, roundi(30 * winFactor(diff))); scout.lose = std::max(1, roundi(20 * loseFactor(diff))); beginBattle();
 }
 static void cancelScout() {                                                 // back out of the base you were looking at: nothing was spent
+  shieldBreakPending = false;
   if (squadBattle) { for (int i = 0; i < U_COUNT; i++) S.army[i] = savedArmy[i]; squadBattle = false; if (squadHeld) { heldSquad.go = false; S.squads.push_back(heldSquad); squadHeld = false; } }
   treacheryPending = false; recording = false; goHome();
 }
@@ -849,8 +869,7 @@ static void raidCheck() {
   if (!incoming && S.t >= S.nextRaid && S.t >= S.shieldUntil) { incoming = true; incomingAt = S.t + 20; audioPlay(SFX_HORN); }
   if (incoming && S.t >= incomingAt) {
     int ob = outsideBuildings(); float p = ob ? std::min(0.7f, 0.25f + 0.08f * ob) : 0.f;
-    if (ob && frand() < p) { incoming = false; outRep = outpostRaid(); modal = M_OUTPOST; modalScroll = 0; audioPlay(outRep.lostB ? SFX_DEFEAT : SFX_VICTORY); saveGame(); }
-    else startDefence();
+    (void)ob; (void)p; startDefence();                      // outposts are now raided in real time by the rival lords' warbands (see bandTick)
   }
 }
 
@@ -931,6 +950,7 @@ static void drawMinimap(float x, float y, float w, float h, bool battle) {
     for (auto& a : S.animals) if (a.alive && a.type == A_WOLF && isExplored((int)std::floor(a.x), (int)std::floor(a.y))) { Pt p = mp(a.x, a.y); G.circle(p.x, p.y, U(1.8f), 0xd04a3a); }
     for (auto& b : S.b) { Pt p = mp(b.x + b.w / 2.f, b.y + b.h / 2.f); float r = U(b.w == 1 ? 1.2f : 1.2f + b.w * 0.9f); uint32_t c = b.type == B_TOWNHALL ? 0xffd34a : b.id == selId ? 0xffffff : (b.type == B_WALL || b.type == B_GATE) ? 0xb8b8b0 : 0x5a8ee8; Pt d[4] = {{p.x, p.y - r * 0.7f}, {p.x + r, p.y}, {p.x, p.y + r * 0.7f}, {p.x - r, p.y}}; G.fillPoly(d, 4, c, 1); }
     for (auto& e : S.expl) { Pt p = mp(e.x, e.y); G.circle(p.x, p.y, U(2.6f), e.id == explSel ? 0xffe27a : 0xffffff); }
+    for (auto& w : S.bands) { Pt p = mp(w.x, w.y); float pl = 0.6f + 0.4f * std::sin(nowSec() * 8.f); G.circle(p.x, p.y, U(4.5f), 0x000000, 0.6f); G.circle(p.x, p.y, U(3.4f), LORD_COL[clampi(w.color, 0, NLORDCOL - 1)], pl); }
     for (auto& rl : S.relics) if (isExplored((int)std::floor(rl.x), (int)std::floor(rl.y))) { Pt p = mp(rl.x, rl.y); G.circle(p.x, p.y, U(2.4f), 0xfff0a0); G.circle(p.x, p.y, U(1.2f), 0xd09a20); }
     for (auto& en : S.enemies) if (enemyDiscovered(en)) { int ox, oy; enemyOrigin(en, ox, oy); Pt p = mp(ox + 15.f, oy + 15.f); float r = U(4.2f); Pt d[4] = {{p.x, p.y - r * 0.7f}, {p.x + r, p.y}, {p.x, p.y + r * 0.7f}, {p.x - r, p.y}}; G.fillPoly(d, 4, LORD_COL[clampi(en.color, 0, NLORDCOL - 1)], 1); }
     if (fogTex) { SDL_Color white{255, 255, 255, 255}; float u0 = (-WEXT - FOGMIN) / (float)FOGN, u1 = (WHI - FOGMIN) / (float)FOGN; Pt a0 = mp(-(float)WEXT, -(float)WEXT), a1 = mp((float)(WHI), -(float)WEXT), a2 = mp((float)(WHI), (float)(WHI)), a3 = mp(-(float)WEXT, (float)(WHI));
@@ -1112,7 +1132,7 @@ static void drawModal() {
           if (uiButton(f.x0 + f.maxW - U(82), f.y, U(82), rh, "Talk", 0, true, F_S)) { diploEnemy = e.id; diploMsg.clear(); modal = M_DIPLO; modalScroll = 0; SDL_RenderSetClipRect(G.r, nullptr); return; }
           int diff = e.seenTc - tcLvl(); std::vector<int> si; int nb = (int)enemyBaseAt(e, e.seenTc, e.seenDead, &si).buildings.size();
           G.text(std::string(LORD_COL_NAME[clampi(e.color, 0, NLORDCOL - 1)]) + " lord " + e.name + "  -  Town Center Lv" + std::to_string(e.seenTc) + "  (" + stanceName(e.stance) + ")", f.x0 + U(10), f.y + U(5), F_M, en ? mixc(LORD_COL[clampi(e.color, 0, NLORDCOL - 1)], 0xffffff, 0.3f) : 0x7a8696);
-          G.text(std::string(diff == 0 ? "same level as you" : diff > 0 ? std::to_string(diff) + " above you" : std::to_string(-diff) + " below you") + "  -  " + CIVS[clampi(e.civ, 0, NCIV - 1)].name + "  -  " + std::to_string(nb) + " buildings  -  " + PERSONALITY[e.pers], f.x0 + U(10), f.y + U(32), F_S, C_DIM);
+          G.text(std::string(diff == 0 ? "same level as you" : diff > 0 ? std::to_string(diff) + " above you" : std::to_string(-diff) + " below you") + "  -  " + CIVS[clampi(e.civ, 0, NCIV - 1)].name + "  -  " + std::to_string(nb) + " buildings  -  " + PERSONALITY[e.pers] + (lordAwake(e) ? "  -  online" : "  -  offline"), f.x0 + U(10), f.y + U(32), F_S, C_DIM);
           f.y += rh + U(6);
         }
         if (!any) flowPara(f, S.enemies.empty() ? "No rival lord has settled yet - one may appear in an empty quadrant." : "A rival lord lives in another quadrant. Send scouts (Explore) across the map to find them.", C_DIM, F_S); }
@@ -1513,7 +1533,7 @@ static void drawHud() {
     float rw[NRES], total = 0; std::string rs[NRES], cs[NRES];
     for (int k = 0; k < NRES; k++) { rs[k] = std::to_string((int)std::round(dispRes[k])); cs[k] = "/" + std::to_string(cap()); rw[k] = U(28) + G.textSize(rs[k], F_M).x + G.textSize(cs[k], F_S).x + U(69); total += rw[k] + U(6); }
     for (int k = 0; k < NRES; k++) x += chipIcon(x, pad, RES_ICON[k], rs[k], cs[k], S.res[k] / (float)cap(), RES_COL[k] == 0x8a5a2b ? 0xc89050 : RES_COL[k], workersOn(k)) + U(6);
-    std::string rk = std::string(rankOf(S.renown)); std::string sh = S.shieldUntil > S.t ? "  shield " + fmtTime(S.shieldUntil - S.t) : "";
+    std::string rk = std::string(rankOf(S.renown)); std::string sh = S.shieldUntil > S.t ? "  shield " + fmtTime(S.shieldUntil - S.t) : ""; if (S.outShieldUntil > S.t) sh += "  outposts " + fmtTime(S.outShieldUntil - S.t);
     std::string pop = std::to_string(idleV()) + " idle", popS = "/ " + std::to_string(S.villagers) + "/" + std::to_string(vCap()), ageS = ageName(tcLvl()), ageT = "TC" + std::to_string(tcLvl()), renS = std::to_string(S.renown);
     float widths[3] = {U(28) + G.textSize(pop, F_M).x + G.textSize(popS, F_S).x + U(27), U(28) + G.textSize(ageS, F_M).x + G.textSize(ageT, F_S).x + U(27), U(28) + G.textSize(renS, F_M).x + G.textSize(rk + sh, F_S).x + U(27)};
     float btnW = U(70), totalR = widths[0] + widths[1] + widths[2] + btnW + U(24), rx = G.W - totalR - pad; bool wrapRow = rx < x; float ry = wrapRow ? pad + U(44) : pad; if (wrapRow) rx = pad;
@@ -1527,6 +1547,13 @@ static void drawHud() {
       float w = G.textSize(h, F_M).x + U(40), hy = pad + U(wrapRow ? 92 : 50), hx = (G.W - w) / 2;
       G.shadowBox(hx, hy, w, U(34), U(17), 0.35f, U(8)); G.rrect(hx - U(1.2f), hy - U(1.2f), w + U(2.4f), U(36.4f), U(18), 0x3a2208, 1.f); G.gradRRect(hx, hy, w, U(34), U(17), 0xf6cc62, 0xb07a1c, 1.f);
       G.text(h, G.W / 2.f, hy + U(6), F_M, 0x2b1806, A_CENTER);
+    }
+    if (!S.bands.empty() && modal == M_NONE) {
+      const Warband& w = S.bands[0]; float dist = std::hypot(w.tx - w.x, w.ty - w.y), eta = dist / std::max(0.3f, bandSpeed(w));
+      std::string a = w.state == 0 ? w.lord + "'s warband marches on your outpost  -  " + std::to_string((int)std::ceil(eta)) + "s" : w.state == 1 ? w.lord + "'s warband is attacking your outpost!" : w.lord + "'s warband is leaving";
+      float bw = U(78), w2 = G.textSize(a, F_M).x + U(40), hy = pad + U(wrapRow ? 176 : 134) + (incoming ? U(42) : 0.f), hx = (G.W - w2 - bw - U(8)) / 2, pulse = 0.75f + 0.25f * std::sin(nowSec() * 7.f);
+      G.shadowBox(hx, hy, w2, U(34), U(17), 0.4f, U(8)); G.gradRRect(hx, hy, w2, U(34), U(17), shadec(0xd2523e, 0.1f * pulse), 0x7e241a, 1.f); G.textShadow(a, hx + w2 / 2, hy + U(6), F_M, 0xfff0e8, A_CENTER); block(hx, hy, w2, U(34));
+      if (uiButton(hx + w2 + U(8), hy, bw, U(34), "Show", 1, true, F_S)) { cam.vx = cam.vy = 0; cam.zoom = cam.zt = std::max(cam.zoom, 1.2f); Pt p = iso(w.x, w.y); cam.x += G.W / 2.f - p.x; cam.y += G.H / 2.f - p.y; }
     }
     if (incoming) {
       std::string a = "Raiders approach!  " + std::to_string((int)std::ceil(incomingAt - S.t)) + "s"; float w = G.textSize(a, F_M).x + U(40), pulse = 0.75f + 0.25f * std::sin(nowSec() * 7.f), hy = pad + U(wrapRow ? 134 : 92);
@@ -1684,15 +1711,11 @@ static void boot() {
   double away = std::max(0.0, std::min(28800.0, (double)((long long)std::time(nullptr) - S.lastSeen)));
   if (away > 10) {
     float before[NRES]; for (int i = 0; i < NRES; i++) before[i] = S.res[i];
-    for (double left = away; left > 0; left -= 10) { float dt = (float)std::min(10.0, left); S.t += dt; econTick(dt); }
+    g_offline = true; for (double left = away; left > 0; left -= 10) { float dt = (float)std::min(10.0, left); S.t += dt; econTick(dt); } g_offline = false;      // your economy runs on, the rival lords wait for you
     welcome.away = away; for (int i = 0; i < NRES; i++) welcome.gain.v[i] = (int)(S.res[i] - before[i]);
     welcome.raided = false;
     welcome.outpost = false;
-    if (tcLvl() >= 2 && S.nextRaid > 0 && S.t >= S.nextRaid && S.t >= S.shieldUntil) {
-      int ob = outsideBuildings();
-      if (ob && frand() < std::min(0.7f, 0.25f + 0.08f * ob)) { outRep = outpostRaid(); welcome.outpost = true; }
-      else { welcome.rep = headlessRaid(); welcome.raided = true; }
-    }
+    if (S.nextRaid > 0) S.nextRaid = std::max(S.nextRaid, S.t + 120 + frand() * 120);      // nobody attacks while you are away: raids resume a little after you are back
     modal = M_WELCOME;
   } else if (!S.seenIntro) modal = M_INTRO;
 }
@@ -1825,7 +1848,7 @@ static bool smokePlaceAt(BType t, int x, int y) {
   pay(d.cost); Bld& b = addB(t, x, y, 0); b.building = true; b.bStart = (float)S.t; b.bEnd = (float)S.t + d.time; b.bTo = 1; return true;
 }
 static int smoke() {
-  smokeLog = std::fopen("smoke.log", "w"); g_savePath = "smoke_save.txt"; newGame(); centerCamera(); modal = M_NONE; S.seenIntro = true;
+  smokeLog = std::fopen("smoke.log", "w"); g_savePath = "smoke_save.txt"; g_bandsOff = true; newGame(); centerCamera(); modal = M_NONE; S.seenIntro = true;
   static std::string keep;
   auto frames = [&](int n, float dt = 0.05f) { for (int i = 0; i < n; i++) { updateWorld(dt); renderFrame(); } };
   auto shot = [&](const char* name) { keep = std::string("smoke_") + name + ".bmp"; shotPath = keep.c_str(); renderFrame(); LOG("shot %s", name); };
@@ -2122,7 +2145,7 @@ static int smoke() {
       saveGame(); Enemy sv = S.enemies[0]; S.enemies.clear(); bool lg = loadGame(); LOG("load: %d, enemies %d name '%s' vs '%s' seed %u vs %u tc %d vs %d", (int)lg, (int)S.enemies.size(), S.enemies.empty() ? "" : S.enemies[0].name.c_str(), sv.name.c_str(), S.enemies.empty() ? 0u : S.enemies[0].seed, sv.seed, S.enemies.empty() ? 0 : S.enemies[0].tc, sv.tc); CHECK(lg && S.enemies.size() >= 1 && S.enemies[0].name == sv.name && S.enemies[0].seed == sv.seed && S.enemies[0].tc == sv.tc, "rival lords are saved");
       { std::ifstream sf("smoke_save.txt", std::ios::binary); std::string txt((std::istreambuf_iterator<char>(sf)), std::istreambuf_iterator<char>()); sf.close();
         size_t rp = txt.find("RPL "); size_t cut = rp == std::string::npos ? std::string::npos : txt.rfind('\n', txt.rfind('\n', rp) - 1);
-        CHECK(txt.compare(0, 5, "DOK15") == 0 && cut != std::string::npos, "the save is the current version");
+        CHECK(txt.compare(0, 5, "DOK16") == 0 && cut != std::string::npos, "the save is the current version");
         if (cut != std::string::npos) { std::string old = "DOK6" + txt.substr(5, cut + 1 - 5); std::ofstream of("smoke_old.txt", std::ios::binary | std::ios::trunc); of << old; of.close(); std::string keep = g_savePath; g_savePath = "smoke_old.txt";
           bool okOld = loadGame(); g_savePath = keep; CHECK(okOld && S.enemies.size() >= 1 && S.replays.empty() && S.fog.size() == (size_t)WORLD * WORLD, "a save from before the four quadrants loads and gets a rival lord"); } }
       Pt c0 = iso(15.f, 15.f); (void)c0;
@@ -2265,6 +2288,34 @@ static int smoke() {
     startReplay(0); frames(40); CHECK(replaying && view == V_BATTLE && RP.step > 20, "the replay viewer plays"); shot("41_replay"); modal = M_NONE; replaying = false; goHome(); modal = M_REPLAYS; frames(14); shot("42_replay_list"); modal = M_NONE; }
   { diploEnemy = S.enemies[0].id; diploMsg = "Lord X considers your offer..."; modal = M_DIPLO; frames(10); shot("50_diplomacy"); modal = M_NONE;
     S.relics.push_back({S.aid++, 6.5f, 20.5f}); { float gx = 6.5f, gy = 20.5f, zm = 2.0f; cam.zoom = cam.zt = zm; cam.x = G.W / 2.f - (gx - gy) * TW / 2 * zm; cam.y = G.H / 2.f - (gx + gy) * TH / 2 * zm; cam.vx = cam.vy = 0; } frames(6); shot("51_relic"); centerCamera(); }
+  {   // lords keep their own hours and wait while you are offline; warbands raid outposts in real time; outpost shields
+    S.enemies.clear(); Enemy en; en.id = S.aid++; en.quad = 1; en.tc = 4; en.name = "Test Lord"; en.seed = 4242; en.color = 2; en.civ = 3; en.stance = ST_WAR; en.nextLvl = 30; S.enemies.push_back(en); int eid = en.id;
+    { int on = 0; double t0 = S.t; for (int i = 0; i < 2000; i++) { S.t = t0 + i * 60.0; if (lordAwake(S.enemies[0])) on++; } S.t = t0; LOG("lord online %d of 2000 minutes", on); CHECK(on > 800 && on < 1800, "a lord plays in sessions and is offline some of the time"); }
+    g_offline = true; for (int i = 0; i < 300; i++) { S.t += 10; econTick(10.f); } g_offline = false; CHECK(findEnemy(eid) && findEnemy(eid)->tc == 4, "lords do not level up while the game is closed");
+    { Enemy* e = findEnemy(eid); e->nextLvl = 5; int lv0 = e->tc; for (int i = 0; i < 4000 && e->tc == lv0; i++) { S.t += 1; econTick(1.f); e = findEnemy(eid); } CHECK(e && e->tc == lv0 + 1, "lords level up while you play (when they are online)"); e->tc = 4; }
+    S.bands.clear(); S.outShieldUntil = 0; S.outStreak = 0; g_bandsOff = false;
+    Bld& o1 = addB(B_LUMBER, 52, 44, 1); int o1id = o1.id; S.res[WOOD] += 0; (void)o1;
+    launchBand(eid, o1id); CHECK(S.bands.size() == 1 && S.bands[0].state == 0 && !S.bands[0].u.empty(), "an online lord sends a warband at your outpost"); float d0 = std::hypot(S.bands[0].tx - S.bands[0].x, S.bands[0].ty - S.bands[0].y);
+    { Pt dummy{}; (void)dummy; centerCamera(); frames(4); shot("57_warband_alert"); }
+    for (int i = 0; i < 50; i++) { S.t += 0.1; econTick(0.1f); } CHECK(!S.bands.empty() && std::hypot(S.bands[0].tx - S.bands[0].x, S.bands[0].ty - S.bands[0].y) < d0 - 1.f, "the warband marches across the map");
+    { Warband& w = S.bands[0]; float gx = w.x, gy = w.y; cam.zoom = cam.zt = 1.6f; Pt p = iso(gx, gy); cam.x += G.W / 2.f - p.x; cam.y += G.H / 2.f - p.y; frames(3); shot("58_warband_march"); }
+    bool gone = false; for (int i = 0; i < 6000 && !gone; i++) { S.t += 0.1; econTick(0.1f); gone = true; float dmg = -1; for (auto& b : S.b) if (b.id == o1id) { gone = false; dmg = b.dmg; } }
+    CHECK(gone, "an undefended outpost is destroyed by the warband"); for (int i = 0; i < 6000 && !S.bands.empty(); i++) { S.t += 0.1; econTick(0.1f); }
+    double sh1 = S.outShieldUntil - S.t; LOG("outpost shield after first loss: %.0f s, streak %d", sh1, S.outStreak); CHECK(S.bands.empty() && sh1 > 600 && S.outStreak == 1, "losing outpost buildings gives an outpost shield");
+    S.bandCheck = 0; for (int i = 0; i < 400; i++) { S.t += 1; econTick(1.f); } CHECK(S.bands.empty(), "no warband comes while the outpost shield holds");
+    S.outShieldUntil = S.t; int o2id = addB(B_LUMBER, 52, 44, 1).id; launchBand(eid, o2id); for (int i = 0; i < 12000 && !S.bands.empty(); i++) { S.t += 0.1; econTick(0.1f); }
+    double sh2 = S.outShieldUntil - S.t; LOG("outpost shield after second loss: %.0f s, streak %d", sh2, S.outStreak); CHECK(sh2 > sh1 + 300 && S.outStreak == 2, "consecutive losses give longer shields");
+    // defend with a squad: the warband is beaten and nothing is lost
+    S.outShieldUntil = S.t; Bld& o3 = addB(B_LUMBER, 52, 44, 1); int o3id = o3.id; S.army[U_LONGSWORD] = 14; int cn[U_COUNT] = {}; cn[U_LONGSWORD] = 14; CHECK(formSquad(cn), "a defending squad is formed"); Squad& dq = S.squads.back(); dq.x = dq.tx = 54.f; dq.y = dq.ty = 46.5f; dq.mode = SQ_GUARD; dq.gx = dq.x; dq.gy = dq.y; int dqid = dq.id;
+    findEnemy(eid)->tc = 2; launchBand(eid, o3id); int rn0 = S.renown; for (int i = 0; i < 12000 && !S.bands.empty(); i++) { S.t += 0.1; econTick(0.1f); }
+    bool still = false; for (auto& b : S.b) if (b.id == o3id) still = true; CHECK(S.bands.empty() && still && S.renown > rn0 && S.outStreak == 0, "your squad defends the outpost and destroys the warband"); LOG("squad left: %d", findSquad(dqid) ? (int)findSquad(dqid)->u.size() : 0);
+    S.squads.clear(); S.army[U_LONGSWORD] = 0; for (auto it = S.b.begin(); it != S.b.end();) { if (it->id == o3id) it = S.b.erase(it); else ++it; }
+    // attacking another lord drops your shields
+    S.shieldUntil = S.t + 3600; S.outShieldUntil = S.t + 3600; S.army[U_MILITIA] += 2; startBarb(1); deployRec(U_MILITIA, -2.f, 15.f); CHECK(S.shieldUntil > S.t && S.outShieldUntil > S.t, "raiding barbarians keeps your shields"); goHome();
+    findRival(true); deployRec(U_MILITIA, -2.f, 15.f); CHECK(S.shieldUntil <= S.t && S.outShieldUntil <= S.t, "attacking another lord drops your shields"); goHome();
+    g_bandsOff = true; S.bands.clear(); S.enemies.clear(); S.outShieldUntil = 0; S.outStreak = 0;
+    for (int k = 0; k < 80 && S.enemies.empty(); k++) { S.t += 37; S.enemyCheck = S.t - 1; econTick(0.1f); }
+  }
   {   // rival civs, revenge
     bool civOk = true; for (auto& en : S.enemies) if (en.civ < 0 || en.civ >= NCIV) civOk = false; CHECK(civOk && !S.enemies.empty(), "every rival lord has a civilization");
     { std::set<int> civs, cols; for (int i = 0; i < 30; i++) { S.enemies.clear(); S.aid += 7; for (int k = 0; k < 80 && S.enemies.empty(); k++) { S.t += 37; S.enemyCheck = S.t - 1; econTick(0.1f); } if (!S.enemies.empty()) { civs.insert(S.enemies[0].civ); cols.insert(S.enemies[0].color); } }

@@ -147,7 +147,7 @@ static double enemyLevelTime(int tc) { return 1100.0 + 250.0 * tc; }
 static void spawnEnemy(int quad, int tc) {
   Enemy e; e.id = S.aid++; e.quad = quad; e.tc = clampi(tc, 1, MAXTC);
   Rng r(S.seed ^ (uint32_t)(e.id * 7919) ^ (uint32_t)(S.t * 3)); e.name = std::string(LORD_FIRST[(int)(r.next() * 30)]) + " " + LORD_TITLE[(int)(r.next() * 10)];
-  e.seed = (uint32_t)(r.next() * 4e9); e.pers = genBase(e.seed, e.tc, false, 0).pers; e.nextLvl = S.t + enemyLevelTime(e.tc);
+  e.seed = (uint32_t)(r.next() * 4e9); e.pers = genBase(e.seed, e.tc, false, 0).pers; e.nextLvl = enemyLevelTime(e.tc);      // nextLvl = seconds of his own play time until the next level
   { bool used[NLORDCOL] = {}; for (auto& o : S.enemies) if (o.color >= 0 && o.color < NLORDCOL) used[o.color] = true; std::vector<int> fr; for (int c = 0; c < NLORDCOL; c++) if (!used[c]) fr.push_back(c); e.color = fr.empty() ? (int)(r.next() * NLORDCOL) % NLORDCOL : fr[(size_t)(r.next() * fr.size()) % fr.size()]; }     // a colour no living lord has; kept until he is defeated
   e.civ = (int)(r.next() * NCIV) % NCIV;                                  // and a random civilization
   e.stance = (e.pers == 1 || e.pers == 3) ? ST_WAR : ST_PEACE;          // Raiders and Warlords start at war with you, Turtles and Merchants keep the peace
@@ -244,6 +244,13 @@ static void animalSpot(Animal& a) {
   }
 }
 static void computeVisibility();
+static void bandTick(float dt);
+static bool bOutside(const Bld& b);
+bool g_offline = false, g_bandsOff = false;
+bool lordAwake(const Enemy& e) {        // each lord plays in sessions: a cycle of 50-110 minutes, online for 55-80% of it
+  uint32_t h = e.seed * 2654435761u + 0x9e3779b9u; double period = 3000.0 + (h % 3600u); double frac = 0.55 + ((h >> 12) % 100u) / 400.0, ph = ((h >> 20) % 1000u) / 1000.0;
+  double c = std::fmod(S.t / period + ph, 1.0); return c < frac;
+}
 static int g_arrSquad = -1, g_arrEnemy = -1;
 static float villHp() { return S.meta.boon == BOON_HARDY ? 110.f : 30.f; }
 static void worldTick(float dt) {
@@ -264,14 +271,14 @@ static void worldTick(float dt) {
     if (L > 0.08f) { float s = std::min(sp * dt, L); a.x += dx / L * s; a.y += dy / L * s; a.aph += s / 0.7f; a.face = std::fabs(dx) > std::fabs(dy) ? (dx > 0 ? 0 : 2) : (dy > 0 ? 1 : 3); }
     else if (!a.chasing) { a.wait -= dt; if (a.wait <= 0) { a.wait = 3 + frnd() * 7; a.tx = a.hx + (frnd() * 2 - 1) * 3.2f; a.ty = a.hy + (frnd() * 2 - 1) * 3.2f; } }
   }
-  for (auto& e : S.enemies) if (t >= e.nextLvl && e.tc < MAXTC) { e.tc++; e.dead.clear(); e.nextLvl = t + enemyLevelTime(e.tc); }
+  if (!g_offline) for (auto& e : S.enemies) if (e.tc < MAXTC && lordAwake(e)) { e.nextLvl -= dt; if (e.nextLvl <= 0) { e.tc++; e.dead.clear(); e.nextLvl = enemyLevelTime(e.tc); } }      // lords only grow while you (and they) are playing
   // trade routes pay out, relics slowly make gold, fresh relics turn up, treaties with Raiders / Warlords may not last
   { int allowed = tradeRoutesAllowed(), active = 0;
     for (auto& e : S.enemies) if (e.stance >= ST_TRADE) { if (active++ >= allowed) continue; Cost inc = tradeIncome(e); for (int k = 0; k < NRES; k++) { e.tacc[k] += inc.v[k] * dt / 60.f; int w = (int)std::floor(e.tacc[k]); if (w > 0) { e.tacc[k] -= w; S.res[k] = std::min((float)cap(), S.res[k] + w); } } } }
   { float gm = relicGoldPerMin(); if (gm > 0) S.res[GOLD] = std::min((float)cap(), S.res[GOLD] + gm * dt / 60.f); }
   if (t >= S.relicCheck) { S.relicCheck = t + 1200 + frnd() * 1200; int carrying = 0; for (auto& ex : S.expl) if (ex.carry) carrying++;
     if ((int)S.relics.size() + S.relicsHeld + carrying < 14) for (int k = 0; k < 60; k++) { float x = -WEXT + 2 + frnd() * (WORLD - 4), y = -WEXT + 2 + frnd() * (WORLD - 4); if (inAnyHome(x, y, 3)) continue; spawnRelicAt(std::floor(x) + .5f, std::floor(y) + .5f); break; } }
-  if (t >= S.enemyCheck) {                                          // now and then a new lord settles an empty quadrant, a bit stronger the further you have come
+  if (!g_offline && t >= S.enemyCheck) {                                          // now and then a new lord settles an empty quadrant, a bit stronger the further you have come
     S.enemyCheck = t + 600 + frnd() * 600; bool used[4] = {true, false, false, false}; for (auto& e : S.enemies) used[e.quad] = true;
     std::vector<int> freeQ; for (int q = 1; q < 4; q++) if (!used[q]) freeQ.push_back(q);
     for (auto& e : S.enemies) if (e.stance == ST_PEACE && (e.pers == 1 || e.pers == 3) && frnd() < 0.12f) { e.stance = ST_WAR; e.trust = 0; banner(e.name + " has broken the peace!"); }
@@ -322,6 +329,8 @@ static void worldTick(float dt) {
     if (q.mode == SQ_ESCORT) { Explorer* ex = findExplorer(q.target); if (!ex) { q.mode = SQ_FREE; q.go = false; } else { float d = std::hypot(ex->x - q.x, ex->y - q.y); if (d > 1.7f) { q.tx = ex->x; q.ty = ex->y; q.go = true; spd = std::max(spd, ex->vill ? 1.7f : ex->monk ? 2.2f : spd); } else q.go = false; } }
     else if (q.mode == SQ_GUARD) { if (std::hypot(q.gx - q.x, q.gy - q.y) > 0.7f) { q.tx = q.gx; q.ty = q.gy; q.go = true; } else q.go = false; }
     else if (q.mode == SQ_ATTACK) { Enemy* en = findEnemy(q.target); if (!en) { q.mode = SQ_FREE; q.go = false; } else { int ox, oy; enemyOrigin(*en, ox, oy); q.tx = ox + 15.f; q.ty = oy + 15.f; q.go = true; if (std::hypot(q.tx - q.x, q.ty - q.y) <= 14.f) { g_arrSquad = q.id; g_arrEnemy = en->id; q.mode = SQ_FREE; q.go = false; } } }
+    { Warband* wb = nullptr; float bdw = q.mode == SQ_GUARD ? 9.f : 7.f; for (auto& w : S.bands) { float d = std::hypot(w.x - q.x, w.y - q.y); if (d < bdw && !w.u.empty()) { bdw = d; wb = &w; } }      // troops go for enemy warbands nearby (the fighting is in bandTick)
+      if (wb && q.mode != SQ_ESCORT && q.mode != SQ_ATTACK && !q.recall && bdw > 1.5f) { q.tx = wb->x; q.ty = wb->y; q.go = true; } }
     // fight wild animals in reach (melee up close, archers from range); idle troops walk up to animals that threaten them
     Animal* tgt = nullptr; float bd = 6.f; for (auto& a : S.animals) if (a.alive) { float d = std::hypot(a.x - q.x, a.y - q.y); if (d < bd && (a.type != A_DEER || d < 1.8f)) { bd = d; tgt = &a; } }
     if (tgt) {
@@ -333,6 +342,7 @@ static void worldTick(float dt) {
     if (q.go) { float dx = q.tx - q.x, dy = q.ty - q.y, L = std::hypot(dx, dy); if (L < 0.15f) { q.go = false; if (q.recall) { for (auto& u : q.u) S.army[u.type]++; toast("The squad is back home"); S.squads.erase(S.squads.begin() + i); continue; } } else { float s = std::min(spd * dt, L); q.x += dx / L * s; q.y += dy / L * s; q.aph += s / 1.6f; q.face = (int)std::lround(std::atan2(-dy, dx) / 0.785398f); q.face = ((q.face % 8) + 8) % 8; } }
     revealAround(q.x, q.y, 6.5f); i++;
   }
+  bandTick(dt);
   computeVisibility();
 }
 bool g_visDirty = true;
@@ -401,6 +411,99 @@ bool demolish(int id) {
 }
 static bool bOutside(const Bld& b) { return !inHome(b.x + b.w / 2.f, b.y + b.h / 2.f); }
 int outsideBuildings() { int n = 0; for (auto& b : S.b) if (bOutside(b)) n++; return n; }
+// ===================================================== warbands: rival lords raid your outposts in real time
+float bandSpeed(const Warband& w) { float m = 99; for (auto& u : w.u) m = std::min(m, udef(u.type).speed); return clampf((m > 90 ? 1.f : m) * 0.9f, 0.6f, 1.6f); }
+float bandHpFrac(const Warband& w) { float cur = 0, mx = 0; SideMul em = enemyMul(w.tc); for (auto& u : w.u) { cur += u.hp; mx += udef(u.type).hp * em.hp; } return mx > 0 ? clampf(cur / mx, 0, 1) : 0; }
+static void hurtFront(std::vector<SqUnit>& us, float dmg) { while (dmg > 0 && !us.empty()) { SqUnit& f0 = us.front(); if (f0.hp > dmg) { f0.hp -= dmg; dmg = 0; } else { dmg -= f0.hp; us.erase(us.begin()); } } }
+static void groupDps(const std::vector<SqUnit>& us, const SideMul& m, float& melee, float& ranged, float& siege) {
+  melee = ranged = siege = 0;
+  for (auto& u : us) { const UDef& d = udef(u.type); float dps = d.dmg / std::max(0.5f, d.rate); if (d.siege) siege += dps * m.siege; else if (d.ranged) ranged += dps * m.ranged; else melee += dps * m.melee; }
+}
+void launchBand(int enemyId, int targetId) {
+  Enemy* e = findEnemy(enemyId); if (!e) return;
+  int ox, oy; enemyOrigin(*e, ox, oy); float sx = ox + 15.f, sy = oy + 15.f;
+  std::vector<Bld*> cand; for (auto& b : S.b) if (bOutside(b) && !isPiece(b.type)) cand.push_back(&b);
+  if (cand.empty()) for (auto& b : S.b) if (bOutside(b)) cand.push_back(&b);
+  if (cand.empty()) return;
+  std::sort(cand.begin(), cand.end(), [&](Bld* a, Bld* b) { return std::hypot(a->x - sx, a->y - sy) < std::hypot(b->x - sx, b->y - sy); });
+  Bld* tg = cand[std::min(cand.size() - 1, (size_t)(frnd() * std::min<size_t>(3, cand.size())))];     // one of the outposts nearest to him
+  for (auto* cb : cand) if (cb->id == targetId) tg = cb;
+  Warband w; w.id = S.aid++; w.enemyId = e->id; w.color = e->color; w.tc = e->tc; w.lord = e->name; w.x = sx; w.y = sy; w.tx = tg->x + tg->w / 2.f; w.ty = tg->y + tg->h / 2.f;
+  int n = clampi(roundi(2.f + e->tc * 1.1f), 3, 14); SideMul em = enemyMul(e->tc);
+  for (int i = 0; i < n; i++) { UType t = tierUnit(e->tc, i); if (t == U_TREBUCHET || t == U_BOMBARD || t == U_MANGONEL) t = U_RAM; if (t == U_MONK) t = U_MILITIA; w.u.push_back({(int)t, udef(t).hp * em.hp}); }
+  S.bands.push_back(w); banner(e->name + "'s warband marches on your outpost!");
+}
+static void endBand(const Warband& w, bool destroyed) {
+  if (w.lost > 0) {                                                   // you lost buildings: an outpost shield, longer after every loss in a row
+    if (S.t - S.outLastLoss > 3 * 3600.0) S.outStreak = 0;
+    double dur = std::min(4 * 3600.0, 900.0 * (1 + S.outStreak)); S.outStreak++; S.outLastLoss = S.t; S.outShieldUntil = std::max(S.outShieldUntil, S.t + dur);
+    banner("Outposts lost " + std::to_string(w.lost) + " building(s) - outpost shield " + std::to_string((int)(dur / 60)) + " min");
+  } else if (destroyed) { S.outStreak = 0; banner("You destroyed " + w.lord + "'s warband!"); int rn = 2 + w.tc; S.renown += rn; toast("+" + std::to_string(rn) + " Renown"); }
+  else { S.outStreak = 0; toast(w.lord + "'s warband withdraws"); }
+}
+static void bandTick(float dt) {
+  if (g_offline || g_bandsOff) { S.bands.clear(); return; }
+  double t = S.t;
+  if (t >= S.bandCheck) {                                              // now and then an online lord at war sends a warband at your outposts
+    S.bandCheck = t + 60 + frnd() * 60; int ob = outsideBuildings();
+    if (ob > 0 && t >= S.outShieldUntil && S.bands.empty()) {
+      std::vector<int> c; for (auto& e : S.enemies) if (e.stance == ST_WAR && lordAwake(e)) c.push_back(e.id);
+      if (!c.empty() && frnd() < std::min(0.25f, 0.06f + 0.02f * ob)) launchBand(c[(size_t)(frnd() * c.size()) % c.size()]);
+    }
+  }
+  if (S.bands.empty()) { for (auto& b : S.b) if (b.dmg > 0) { float mh = makeSimB(b.type, std::max(1, b.lvl), 0, 0).maxhp; b.dmg = std::max(0.f, b.dmg - mh * 0.01f * dt); } return; }   // damaged outposts mend slowly
+  SideMul mine = techMul();
+  for (size_t i = 0; i < S.bands.size();) {
+    Warband& w = S.bands[i]; Enemy* lord = findEnemy(w.enemyId);
+    if (w.u.empty()) { endBand(w, true); S.bands.erase(S.bands.begin() + i); continue; }
+    w.fight = std::max(0.f, w.fight - dt); w.life += dt; if (w.life > 480 && w.state < 2) w.state = 2;
+    SideMul em = enemyMul(w.tc); float bm, br, bs; groupDps(w.u, em, bm, br, bs);
+    bool busy = false;
+    // your squads: archers shoot from range, melee closes in; the warband hits back
+    for (auto& q : S.squads) {
+      float d = std::hypot(q.x - w.x, q.y - w.y); if (d > 4.8f || q.u.empty()) continue;
+      float qm, qr, qs; groupDps(q.u, mine, qm, qr, qs);
+      float toBand = (d <= 2.2f ? qm + qr : qr) * dt, toSq = (d <= 2.2f ? bm + br : br) * dt;
+      if (toBand > 0) { hurtFront(w.u, toBand); q.fight = 0.6f; }
+      if (toSq > 0) { hurtFront(q.u, toSq); w.fight = 0.6f; }
+      if (d <= 2.2f) busy = true;
+      if (w.u.empty()) break;
+    }
+    if (w.u.empty()) continue;
+    // your outpost towers, keeps, castles, bombard towers and scorpions shoot at it
+    for (auto& b : S.b) {
+      if (!isDone(b) || isPiece(b.type) || bdef(b.type).dps[0] <= 0) continue;
+      SimB sb = makeSimB(b.type, std::max(1, b.lvl), b.x, b.y); if (sb.dps <= 0) continue;
+      float d = std::hypot(b.x + b.w / 2.f - w.x, b.y + b.h / 2.f - w.y); if (d > sb.range + 1.5f) continue;
+      hurtFront(w.u, sb.dps * mine.ranged * dt); w.fight = 0.6f;
+    }
+    if (w.u.empty()) continue;
+    // explorers in its path get attacked
+    for (auto& ex : S.expl) if (std::hypot(ex.x - w.x, ex.y - w.y) < 1.6f) { if (ex.maxHp <= 0) ex.maxHp = ex.hp = ex.vill ? 30.f : ex.monk ? 45.f : 70.f; ex.hp -= (bm + br) * 0.25f * dt; ex.hurt = 2.5f; }
+    float spd = bandSpeed(w);
+    auto moveTo = [&](float tx, float ty, float stop) { float dx = tx - w.x, dy = ty - w.y, L = std::hypot(dx, dy); if (L <= stop + 0.05f) return true; float s = std::min(spd * dt, L - stop); w.x += dx / L * s; w.y += dy / L * s; w.aph += s / 1.6f; int f = (int)std::lround(std::atan2(-dy, dx) / 0.785398f); w.face = ((f % 8) + 8) % 8; return false; };
+    if (busy) { i++; continue; }                                        // locked in melee with your troops
+    if (w.state == 0) { if (moveTo(w.tx, w.ty, 2.0f)) w.state = 1; }
+    else if (w.state == 1) {
+      Bld* tg = nullptr; float bd = 10.f;
+      for (auto& b : S.b) if (bOutside(b)) { SimB sb = makeSimB(b.type, std::max(1, b.lvl), b.x, b.y); float d = distRect(w.x, w.y, sb); if (d < bd) { bd = d; tg = &b; } }
+      if (!tg) w.state = 2;
+      else if (bd > 1.1f) moveTo(tg->x + tg->w / 2.f, tg->y + tg->h / 2.f, 0.9f);
+      else {
+        float mh = makeSimB(tg->type, std::max(1, tg->lvl), 0, 0).maxhp; tg->dmg += (bm + br + bs * 3.f) * 0.6f * dt; w.fight = 0.6f;
+        if (tg->dmg >= mh) {
+          w.lost++; std::string nm = bdef(tg->type).name; int id = tg->id;
+          for (auto it = S.b.begin(); it != S.b.end(); ++it) if (it->id == id) { S.b.erase(it); break; }       // its workers go back to the village (idle)
+          toast("Your outpost " + nm + " was destroyed!"); sfx(15);
+        }
+      }
+    } else {
+      float hx = w.x, hy = w.y; if (lord) { int ox, oy; enemyOrigin(*lord, ox, oy); hx = ox + 15.f; hy = oy + 15.f; }
+      if (!lord || moveTo(hx, hy, 3.f)) { endBand(w, false); S.bands.erase(S.bands.begin() + i); continue; }
+    }
+    i++;
+  }
+}
 
 // ===================================================== field squads
 Squad* findSquad(int id) { for (auto& q : S.squads) if (q.id == id) return &q; return nullptr; }
@@ -773,7 +876,7 @@ Sim makeDefenceSim() {
   Sim sim; sim.defence = true; sim.started = true;
   Rng r((uint32_t)S.t + S.seed);
   int diff = rollTcDiff(r), atkTc = clampi(tcLvl() + diff, 1, MAXTC); float var = raidVariation(r);
-  std::vector<Enemy*> warLords; for (auto& en : S.enemies) if (en.stance == ST_WAR) warLords.push_back(&en);
+  std::vector<Enemy*> warLords; for (auto& en : S.enemies) if (en.stance == ST_WAR && lordAwake(en)) warLords.push_back(&en);
   if (!warLords.empty() && r.next() < 0.9) { Enemy& src = *warLords[(size_t)(r.next() * warLords.size()) % warLords.size()]; atkTc = src.tc; sim.atkEnemy = src.id; sim.atkName = src.name; }
   diff = atkTc - tcLvl();
   sim.atkTc = atkTc; sim.atkDiff = diff; sim.mul[0] = raidMul(atkTc, var); sim.mul[1] = techMul();
@@ -900,7 +1003,7 @@ static std::string savePath() {
 void saveGame() {
   S.lastSeen = (long long)std::time(nullptr);
   std::ostringstream o; o.precision(9);
-  o << "DOK15 " << S.t << ' ' << S.villagers << ' ' << S.renown << ' ' << S.shieldUntil << ' ' << S.nextRaid << ' ' << S.nid << ' ' << S.seed << ' ' << S.rivalSeq << ' ' << (int)S.seenIntro << ' ' << S.lastSeen << '\n';
+  o << "DOK16 " << S.t << ' ' << S.villagers << ' ' << S.renown << ' ' << S.shieldUntil << ' ' << S.nextRaid << ' ' << S.nid << ' ' << S.seed << ' ' << S.rivalSeq << ' ' << (int)S.seenIntro << ' ' << S.lastSeen << '\n';
   for (int i = 0; i < NRES; i++) o << S.res[i] << ' '; o << '\n';
   o << (int)U_COUNT << ' '; for (int i = 0; i < U_COUNT; i++) o << S.army[i] << ' '; o << '\n';
   o << NCAMP << ' '; for (int i = 0; i <= NCAMP; i++) o << S.camp[i] << ' '; for (int i = 0; i <= NCAMP; i++) o << S.campWins[i] << ' '; o << '\n';
@@ -936,13 +1039,14 @@ void saveGame() {
   o << S.squads.size() << '\n'; for (auto& q : S.squads) { o << q.id << ' ' << q.x << ' ' << q.y << ' ' << q.tx << ' ' << q.ty << ' ' << (int)q.go << ' ' << (int)q.recall << ' ' << q.mode << ' ' << q.target << ' ' << q.gx << ' ' << q.gy << ' ' << q.u.size(); for (auto& u : q.u) o << ' ' << u.type << ' ' << u.hp; o << '\n'; }
   o << S.musicVol << ' ' << S.sfxVol << '\n';
   o << S.meta.civ << ' ' << S.meta.boon << ' ' << (S.meta.outlineOn ? 1 : 0) << '\n';
+  o << S.outShieldUntil << ' ' << S.outStreak << '\n';
   o << S.grudges.size() << '\n'; for (auto& gr : S.grudges) o << gr.enemyId << ' ' << gr.tc << ' ' << gr.seed << ' ' << gr.civ << ' ' << gr.color << '\n' << gr.name << '\n';
   std::ofstream f(savePath(), std::ios::binary | std::ios::trunc); f << o.str();
 }
 bool loadGame() {
   std::ifstream f(savePath(), std::ios::binary); if (!f) return false;
-  std::string magic; f >> magic; if (magic != "DOK1" && magic != "DOK2" && magic != "DOK3" && magic != "DOK4" && magic != "DOK5" && magic != "DOK6" && magic != "DOK7" && magic != "DOK8" && magic != "DOK9" && magic != "DOK10" && magic != "DOK11" && magic != "DOK12" && magic != "DOK13" && magic != "DOK14" && magic != "DOK15") return false;
-  bool dok15 = magic == "DOK15", dok14 = magic == "DOK14" || dok15, dok13 = magic == "DOK13" || dok14, dok12 = magic == "DOK12" || dok13, dok11 = magic == "DOK11" || dok12, dok10 = magic == "DOK10" || dok11, dok9 = magic == "DOK9" || dok10, dok8 = magic == "DOK8" || dok9, dok7 = magic == "DOK7" || dok8; if (dok7) magic = "DOK6";
+  std::string magic; f >> magic; if (magic != "DOK1" && magic != "DOK2" && magic != "DOK3" && magic != "DOK4" && magic != "DOK5" && magic != "DOK6" && magic != "DOK7" && magic != "DOK8" && magic != "DOK9" && magic != "DOK10" && magic != "DOK11" && magic != "DOK12" && magic != "DOK13" && magic != "DOK14" && magic != "DOK15" && magic != "DOK16") return false;
+  bool dok16 = magic == "DOK16", dok15 = magic == "DOK15" || dok16, dok14 = magic == "DOK14" || dok15, dok13 = magic == "DOK13" || dok14, dok12 = magic == "DOK12" || dok13, dok11 = magic == "DOK11" || dok12, dok10 = magic == "DOK10" || dok11, dok9 = magic == "DOK9" || dok10, dok8 = magic == "DOK8" || dok9, dok7 = magic == "DOK7" || dok8; if (dok7) magic = "DOK6";
   int armyN = magic == "DOK1" ? 3 : 9;
   State n; int seen = 0;
   f >> n.t >> n.villagers >> n.renown >> n.shieldUntil >> n.nextRaid >> n.nid >> n.seed >> n.rivalSeq >> seen >> n.lastSeen; n.seenIntro = seen;
@@ -996,7 +1100,9 @@ bool loadGame() {
   if (dok11) { size_t ns = 0; f >> ns; for (size_t i = 0; i < ns && f; i++) { Squad q; int go, rc; size_t nu; f >> q.id >> q.x >> q.y >> q.tx >> q.ty >> go >> rc >> q.mode >> q.target >> q.gx >> q.gy >> nu; q.go = go; q.recall = rc; for (size_t k = 0; k < nu; k++) { SqUnit u; f >> u.type >> u.hp; q.u.push_back(u); } n.squads.push_back(q); } }
   if (dok13) f >> n.musicVol >> n.sfxVol;
   if (dok14) { int oo = 0; f >> n.meta.civ >> n.meta.boon >> oo; n.meta.outlineOn = oo != 0; n.meta.civ = clampi(n.meta.civ, 0, NCIV - 1); n.meta.boon = clampi(n.meta.boon, 0, NBOON - 1); }
+  if (dok16) f >> n.outShieldUntil >> n.outStreak;
   if (dok15) { size_t ng = 0; f >> ng; for (size_t i = 0; i < ng && f; i++) { Grudge gr; f >> gr.enemyId >> gr.tc >> gr.seed >> gr.civ >> gr.color; std::string ln; std::getline(f, ln); std::getline(f, gr.name); gr.civ = clampi(gr.civ, 0, NCIV - 1); gr.color = clampi(gr.color, 0, NLORDCOL - 1); n.grudges.push_back(gr); } }
+  if (!dok16) for (auto& e : n.enemies) e.nextLvl = std::max(60.0, e.nextLvl - n.t);      // older saves kept the absolute time of the next level
   if (!f || n.b.empty()) return false;
   S = n;
   if (magic != "DOK6") genWorld(); else if (!dok9) genWorldOldSave();
